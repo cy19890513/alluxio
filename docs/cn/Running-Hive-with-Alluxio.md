@@ -32,6 +32,15 @@ Apache Hive允许你通过Hadoop通用文件系统接口使用Alluxio，因此�
 </property>
 ```
 
+若要启用容错模式，将Alluxio模式设置为`alluxio-ft`：
+
+```xml
+<property>
+   <name>fs.defaultFS</name>
+   <value>alluxio-ft:///</value>
+</property>
+```
+
 ### 配置Hadoop MapReduce
 
 如果你在Hadoop MapReduce上运行Hive，那么Hive能够从Hadoop的配置文件中读取相应配置。另外，Hive的Hadoop作业会将其中间结果存储在Alluxio中。
@@ -39,7 +48,7 @@ Apache Hive允许你通过Hadoop通用文件系统接口使用Alluxio，因此�
 
 ### 添加额外Alluxio配置到Hive中
 
-如果你有其他需要对Hive指定的Alluxio配置属性，将它们添加到`hive-site.xml`中。例如，将`alluxio.user.file.writetype.default`
+如果你有其他需要对Hive指定的Alluxio配置属性，将它们添加到每个结点的Hadoop配置目录下`core-site.xml`中。例如，将`alluxio.user.file.writetype.default`
 属性由默认的`MUST_CACHE`修改成`CACHE_THROUGH`：
 
 ```xml
