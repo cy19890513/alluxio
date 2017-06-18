@@ -35,6 +35,7 @@ import java.util.concurrent.ThreadPoolExecutor;
  * Unit tests for {@link AsyncUfsAbsentPathCache}.
  */
 public class AsyncUfsAbsentPathCacheTest {
+  private static final int THREADS = 4;
   private AsyncUfsAbsentPathCache mUfsAbsentPathCache;
   private MountTable mMountTable;
 
@@ -50,12 +51,14 @@ public class AsyncUfsAbsentPathCacheTest {
     mLocalUfsPath = Files.createTempDir().getAbsolutePath();
     mUfsManager = new MasterUfsManager();
     mMountTable = new MountTable(mUfsManager);
-    mUfsAbsentPathCache = new AsyncUfsAbsentPathCache(mMountTable);
+    mUfsAbsentPathCache = new AsyncUfsAbsentPathCache(mMountTable, THREADS);
 
     mMountId = IdUtils.getRandomNonNegativeLong();
     MountOptions options = MountOptions.defaults();
-    mUfsManager.addMount(mMountId, mLocalUfsPath, new UnderFileSystemConfiguration(
-        options.isReadOnly(), options.isShared(), Collections.<String, String>emptyMap()));
+    mUfsManager.addMount(mMountId, new AlluxioURI(mLocalUfsPath),
+        UnderFileSystemConfiguration.defaults().setReadOnly(options.isReadOnly())
+            .setShared(options.isShared())
+            .setUserSpecifiedConf(Collections.<String, String>emptyMap()));
     mMountTable.add(new AlluxioURI("/mnt"), new AlluxioURI(mLocalUfsPath), mMountId, options);
   }
 
@@ -157,8 +160,10 @@ public class AsyncUfsAbsentPathCacheTest {
     // Re-mount the same ufs
     long newMountId = IdUtils.getRandomNonNegativeLong();
     MountOptions options = MountOptions.defaults();
-    mUfsManager.addMount(newMountId, mLocalUfsPath, new UnderFileSystemConfiguration(
-        options.isReadOnly(), options.isShared(), Collections.<String, String>emptyMap()));
+    mUfsManager.addMount(newMountId, new AlluxioURI(mLocalUfsPath),
+        UnderFileSystemConfiguration.defaults().setReadOnly(options.isReadOnly())
+            .setShared(options.isShared())
+            .setUserSpecifiedConf(Collections.<String, String>emptyMap()));
     mMountTable.add(new AlluxioURI("/mnt"), new AlluxioURI(mLocalUfsPath), newMountId, options);
 
     // The cache should not contain any paths now.
@@ -205,7 +210,7 @@ public class AsyncUfsAbsentPathCacheTest {
             }
             return true;
           }
-        }, WaitForOptions.defaults().setTimeout(10000));
+        }, WaitForOptions.defaults().setTimeoutMs(10000));
   }
 
   private void removeAbsent(AlluxioURI path) throws Exception {
@@ -222,7 +227,7 @@ public class AsyncUfsAbsentPathCacheTest {
             }
             return true;
           }
-        }, WaitForOptions.defaults().setTimeout(10000));
+        }, WaitForOptions.defaults().setTimeoutMs(10000));
   }
 
   /**

@@ -20,7 +20,6 @@ import alluxio.client.AlluxioStorageType;
 import alluxio.client.BoundedStream;
 import alluxio.client.PositionedReadable;
 import alluxio.client.block.AlluxioBlockStore;
-import alluxio.client.block.BlockWorkerInfo;
 import alluxio.client.block.stream.BlockInStream;
 import alluxio.client.block.stream.BlockOutStream;
 import alluxio.client.file.options.InStreamOptions;
@@ -41,7 +40,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.List;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
@@ -182,7 +180,7 @@ public class FileInStream extends InputStream implements BoundedStream, Seekable
   }
 
   private int readInternal() throws IOException {
-    if (remaining() <= 0) {
+    if (remainingInternal() <= 0) {
       return -1;
     }
     updateStreams();
@@ -211,14 +209,14 @@ public class FileInStream extends InputStream implements BoundedStream, Seekable
         PreconditionMessage.ERR_BUFFER_STATE.toString(), b.length, off, len);
     if (len == 0) {
       return 0;
-    } else if (remaining() <= 0) {
+    } else if (remainingInternal() <= 0) {
       return -1;
     }
 
     int currentOffset = off;
     int bytesLeftToRead = len;
 
-    while (bytesLeftToRead > 0 && remaining() > 0) {
+    while (bytesLeftToRead > 0 && remainingInternal() > 0) {
       updateStreams();
       Preconditions.checkNotNull(mCurrentBlockInStream, PreconditionMessage.ERR_UNEXPECTED_EOF);
       int bytesToRead = (int) Math.min(bytesLeftToRead, mCurrentBlockInStream.remaining());
@@ -295,7 +293,9 @@ public class FileInStream extends InputStream implements BoundedStream, Seekable
 
   @Override
   public long remaining() {
-    return mFileLength - mPos;
+    // WARNING: do not call remaining() directly within this file, use remainingInternal() instead
+    // so that remaining() can be overridden by subclasses.
+    return remainingInternal();
   }
 
   @Override
@@ -319,7 +319,7 @@ public class FileInStream extends InputStream implements BoundedStream, Seekable
       return 0;
     }
 
-    long toSkip = Math.min(n, remaining());
+    long toSkip = Math.min(n, remainingInternal());
     seek(mPos + toSkip);
     return toSkip;
   }
@@ -413,7 +413,7 @@ public class FileInStream extends InputStream implements BoundedStream, Seekable
    * @return the current block id based on mPos, -1 if at the end of the file
    */
   private long getCurrentBlockId() {
-    if (remaining() <= 0) {
+    if (remainingInternal() <= 0) {
       return -1;
     }
     return getBlockId(mPos);
@@ -514,20 +514,11 @@ public class FileInStream extends InputStream implements BoundedStream, Seekable
 
     try {
       // If this block is read from a remote worker, we should never cache except to a local worker.
-      if (!mCurrentBlockInStream.isLocal()) {
-        WorkerNetAddress localWorker = mContext.getLocalWorker();
-        if (localWorker != null) {
-          mCurrentCacheStream =
-              mBlockStore.getOutStream(blockId, getBlockSize(mPos), localWorker, mOutStreamOptions);
-        }
-        return;
+      WorkerNetAddress localWorker = mContext.getLocalWorker();
+      if (localWorker != null) {
+        mCurrentCacheStream =
+            mBlockStore.getOutStream(blockId, getBlockSize(mPos), localWorker, mOutStreamOptions);
       }
-
-      List<BlockWorkerInfo> workers = mBlockStore.getWorkerInfoList();
-      WorkerNetAddress address =
-          mCacheLocationPolicy.getWorkerForNextBlock(workers, getBlockSizeAllocation(mPos));
-      mCurrentCacheStream =
-          mBlockStore.getOutStream(blockId, getBlockSize(mPos), address, mOutStreamOptions);
     } catch (IOException e) {
       handleCacheStreamException(e);
     }
@@ -586,8 +577,12 @@ public class FileInStream extends InputStream implements BoundedStream, Seekable
     if (mCurrentBlockInStream != null) {
       mCurrentBlockInStream.seek(mPos % mBlockSize);
     } else {
-      Preconditions.checkState(remaining() == 0);
+      Preconditions.checkState(remainingInternal() == 0);
     }
+  }
+
+  private long remainingInternal() {
+    return mFileLength - mPos;
   }
 
   /**
@@ -629,7 +624,7 @@ public class FileInStream extends InputStream implements BoundedStream, Seekable
       if (mCurrentBlockInStream != null) {
         mCurrentBlockInStream.seek(mPos % mBlockSize);
       } else {
-        Preconditions.checkState(remaining() == 0);
+        Preconditions.checkState(remainingInternal() == 0);
       }
     } else {
       mPos = pos / mBlockSize * mBlockSize;
@@ -650,6 +645,10 @@ public class FileInStream extends InputStream implements BoundedStream, Seekable
     }
     long len = Math.min(pos - mPos, mCurrentBlockInStream.remaining());
     if (len <= 0) {
+      return;
+    }
+    if (mPos % mBlockSize == 0 && pos - mPos >= mBlockSize) {
+      closeOrCancelCacheStream();
       return;
     }
 

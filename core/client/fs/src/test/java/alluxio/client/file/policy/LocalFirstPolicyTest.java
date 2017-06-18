@@ -33,7 +33,7 @@ public final class LocalFirstPolicyTest {
    * Tests that the local host is returned first.
    */
   @Test
-  public void getLocalFirst() {
+  public void getLocalFirst() throws Exception {
     String localhostName = NetworkAddressUtils.getLocalHostName();
     LocalFirstPolicy policy = new LocalFirstPolicy();
     List<BlockWorkerInfo> workerInfoList = new ArrayList<>();
@@ -49,7 +49,7 @@ public final class LocalFirstPolicyTest {
    * Tests that another worker is picked in case the local host does not have enough space.
    */
   @Test
-  public void getOthersWhenNotEnoughSpaceOnLocal() {
+  public void getOthersWhenNotEnoughSpaceOnLocal() throws Exception {
     String localhostName = NetworkAddressUtils.getLocalHostName();
     LocalFirstPolicy policy = new LocalFirstPolicy();
     List<BlockWorkerInfo> workerInfoList = new ArrayList<>();
@@ -59,6 +59,28 @@ public final class LocalFirstPolicyTest {
         .setRpcPort(PORT).setDataPort(PORT).setWebPort(PORT), Constants.MB, Constants.MB));
     Assert.assertEquals("worker1",
         policy.getWorkerForNextBlock(workerInfoList, Constants.GB).getHost());
+  }
+
+  /**
+   * Tests that non-local workers are randomly selected.
+   */
+  @Test
+  public void getOthersRandomly() throws Exception {
+    LocalFirstPolicy policy = new LocalFirstPolicy();
+    List<BlockWorkerInfo> workerInfoList = new ArrayList<>();
+    workerInfoList.add(new BlockWorkerInfo(new WorkerNetAddress().setHost("worker1")
+        .setRpcPort(PORT).setDataPort(PORT).setWebPort(PORT), Constants.GB, 0));
+    workerInfoList.add(new BlockWorkerInfo(new WorkerNetAddress().setHost("worker2")
+        .setRpcPort(PORT).setDataPort(PORT).setWebPort(PORT), Constants.GB, 0));
+    boolean success = false;
+    for (int i = 0; i < 100; i++) {
+      String host = policy.getWorkerForNextBlock(workerInfoList, Constants.GB).getHost();
+      if (!host.equals(policy.getWorkerForNextBlock(workerInfoList, Constants.GB).getHost())) {
+        success = true;
+        break;
+      }
+    }
+    Assert.assertTrue(success);
   }
 
   @Test

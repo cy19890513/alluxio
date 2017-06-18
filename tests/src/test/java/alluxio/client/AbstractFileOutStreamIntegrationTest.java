@@ -44,16 +44,20 @@ public abstract class AbstractFileOutStreamIntegrationTest extends BaseIntegrati
 
   @Rule
   public LocalAlluxioClusterResource mLocalAlluxioClusterResource =
-      new LocalAlluxioClusterResource.Builder()
-          .setProperty(PropertyKey.USER_FILE_BUFFER_BYTES, BUFFER_BYTES)
-          .setProperty(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT, BLOCK_SIZE_BYTES)
-          .build();
+      buildLocalAlluxioClusterResource();
 
   protected FileSystem mFileSystem = null;
 
   @Before
   public void before() throws Exception {
     mFileSystem = mLocalAlluxioClusterResource.get().getClient();
+  }
+
+  protected LocalAlluxioClusterResource buildLocalAlluxioClusterResource() {
+    return new LocalAlluxioClusterResource.Builder()
+        .setProperty(PropertyKey.USER_FILE_BUFFER_BYTES, BUFFER_BYTES)
+        .setProperty(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT, BLOCK_SIZE_BYTES)
+        .build();
   }
 
   /**
@@ -142,7 +146,15 @@ public abstract class AbstractFileOutStreamIntegrationTest extends BaseIntegrati
         // Returns -1 for zero-sized byte array to indicate no more bytes available here.
         Assert.assertEquals(-1, is.read(res));
       } else {
-        Assert.assertEquals((int) status.getLength(), is.read(res));
+        int totalBytesRead = 0;
+        while (true) {
+          int bytesRead = is.read(res, totalBytesRead, res.length - totalBytesRead);
+          if (bytesRead <= 0) {
+            break;
+          }
+          totalBytesRead += bytesRead;
+        }
+        Assert.assertEquals((int) status.getLength(), totalBytesRead);
       }
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(fileLen, res));
     }

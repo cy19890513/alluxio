@@ -15,7 +15,7 @@
   <parent>
     <groupId>org.alluxio</groupId>
     <artifactId>alluxio-core-client</artifactId>
-    <version>1.5.0-SNAPSHOT</version>
+    <version>1.6.0-SNAPSHOT</version>
   </parent>
   <artifactId>alluxio-core-client-runtime</artifactId>
   <packaging>jar</packaging>
@@ -34,6 +34,14 @@
   </properties>
 
   <dependencies>
+    <!-- External dependencies -->
+    <!-- Have hadoop-client dependency in provided scope by default -->
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
     <!-- Internal dependencies -->
     <!-- This should include all Alluxio client implementations -->
     <dependency>
@@ -66,6 +74,11 @@
         <dependency>
           <groupId>com.fasterxml.jackson.core</groupId>
           <artifactId>jackson-databind</artifactId>
+          <scope>provided</scope>
+        </dependency>
+        <dependency>
+          <groupId>jline</groupId>
+          <artifactId>jline</artifactId>
           <scope>provided</scope>
         </dependency>
         <dependency>
@@ -117,6 +130,17 @@
           <groupId>com.google.inject</groupId>
           <artifactId>guice</artifactId>
           <scope>provided</scope>
+        </dependency>
+      </dependencies>
+    </profile>
+
+    <profile>
+      <id>includeHadoopClient</id>
+      <dependencies>
+        <dependency>
+          <groupId>org.apache.hadoop</groupId>
+          <artifactId>hadoop-client</artifactId>
+          <scope>compile</scope>
         </dependency>
       </dependencies>
     </profile>
