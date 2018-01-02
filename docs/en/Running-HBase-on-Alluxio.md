@@ -32,7 +32,7 @@ Therefore, the configuration of Alluxio is done mostly in HBase configuration fi
 You need to add the following three properties to `hbase-site.xml` in your HBase installation `conf` directory
 (make sure these properties are configured in all HBase cluster nodes):
 
-Tips:You do not need to create the /hbase directory in Alluxio, HBase will do this for you.
+> You do not need to create the `/hbase` directory in Alluxio, HBase will do this for you.
 
 ```xml
 <property>
@@ -45,7 +45,7 @@ Tips:You do not need to create the /hbase directory in Alluxio, HBase will do th
 </property>
 <property>
   <name>hbase.rootdir</name>
-  <value>alluxio://<hostname>:<port>/hbase</value>
+  <value>alluxio://master_hostname:port/hbase</value>
 </property>
 ```
 
@@ -53,6 +53,11 @@ Tips:You do not need to create the /hbase directory in Alluxio, HBase will do th
 
 We need to make the Alluxio client `jar` file available to HBase, because it contains the configured
 `alluxio.hadoop.FileSystem` class.
+We recommend you to download the tarball from
+Alluxio [download page](http://www.alluxio.org/download).
+Alternatively, advanced users can choose to compile this client jar from the source code
+by following Follow the instructs [here](Building-Alluxio-Master-Branch.html#compute-framework-support).
+The Alluxio client jar can be found at `{{site.ALLUXIO_CLIENT_JAR_PATH}}`.
 
 There are two ways to achieve that:
 
@@ -71,8 +76,8 @@ change `alluxio.user.file.writetype.default` from default `MUST_CACHE` to `CACHE
 
 ```xml
 <property>
-<name>alluxio.user.file.writetype.default</name>
-<value>CACHE_THROUGH</value>
+  <name>alluxio.user.file.writetype.default</name>
+  <value>CACHE_THROUGH</value>
 </property>
 ```
 

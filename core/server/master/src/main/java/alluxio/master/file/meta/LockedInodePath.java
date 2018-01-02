@@ -23,6 +23,7 @@ import com.google.common.collect.Lists;
 import java.util.ArrayList;
 import java.util.List;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -34,7 +35,7 @@ public abstract class LockedInodePath implements AutoCloseable {
   protected final String[] mPathComponents;
   protected final ArrayList<Inode<?>> mInodes;
   protected final InodeLockList mLockList;
-  protected final InodeTree.LockMode mLockMode;
+  protected InodeTree.LockMode mLockMode;
 
   LockedInodePath(AlluxioURI uri, List<Inode<?>> inodes, InodeLockList lockList,
       InodeTree.LockMode lockMode)
@@ -68,8 +69,20 @@ public abstract class LockedInodePath implements AutoCloseable {
    * @throws FileDoesNotExistException if the target inode does not exist
    */
   public synchronized Inode<?> getInode() throws FileDoesNotExistException {
-    if (!fullPathExists()) {
+    Inode<?> inode = getInodeOrNull();
+    if (inode == null) {
       throw new FileDoesNotExistException(ExceptionMessage.PATH_DOES_NOT_EXIST.getMessage(mUri));
+    }
+    return inode;
+  }
+
+  /**
+   * @return the target inode, or null if it does not exist
+   */
+  @Nullable
+  public synchronized Inode<?> getInodeOrNull() {
+    if (!fullPathExists()) {
+      return null;
     }
     return mInodes.get(mInodes.size() - 1);
   }
@@ -91,18 +104,37 @@ public abstract class LockedInodePath implements AutoCloseable {
    * @throws InvalidPathException if the parent inode is not a directory
    * @throws FileDoesNotExistException if the parent of the target does not exist
    */
-  public synchronized  InodeDirectory getParentInodeDirectory()
+  public synchronized InodeDirectory getParentInodeDirectory()
       throws InvalidPathException, FileDoesNotExistException {
-    if (mPathComponents.length < 2 || mInodes.size() < (mPathComponents.length - 1)) {
-      // The path is only the root, or the list of inodes is not long enough to contain the parent
+    Inode inode = getParentInodeOrNull();
+    if (inode == null) {
       throw new FileDoesNotExistException(
           ExceptionMessage.PATH_DOES_NOT_EXIST.getMessage(mUri.getParent()));
     }
-    Inode<?> inode = mInodes.get(mPathComponents.length - 2);
     if (!inode.isDirectory()) {
-      throw new InvalidPathException(ExceptionMessage.PATH_MUST_HAVE_VALID_PARENT.getMessage(mUri));
+      throw new InvalidPathException(
+          ExceptionMessage.PATH_MUST_HAVE_VALID_PARENT.getMessage(mUri));
     }
     return (InodeDirectory) inode;
+  }
+
+  /**
+   * @return the parent of the target inode, or null if the parent does not exist
+   */
+  @Nullable
+  public synchronized Inode getParentInodeOrNull() {
+    if (mPathComponents.length < 2 || mInodes.size() < (mPathComponents.length - 1)) {
+      // The path is only the root, or the list of inodes is not long enough to contain the parent
+      return null;
+    }
+    return mInodes.get(mPathComponents.length - 2);
+  }
+
+  /**
+   * @return the last existing inode on the inode path
+   */
+  public synchronized Inode getLastExistingInode() {
+    return mInodes.get(mInodes.size() - 1);
   }
 
   /**
@@ -129,5 +161,39 @@ public abstract class LockedInodePath implements AutoCloseable {
   @Override
   public synchronized void close() {
     mLockList.close();
+  }
+
+  /**
+   * Downgrades the last inode that was locked, if the inode was previously WRITE locked. If the
+   * inode was previously READ locked, no additional locking will occur.
+   */
+  public synchronized void downgradeLast() {
+    mLockList.downgradeLast();
+  }
+
+  /**
+   * Downgrades the last inode that was locked, according to the specified {@link LockingScheme}.
+   * If the locking scheme initially desired the READ lock, the downgrade will occur. Otherwise,
+   * downgrade will not be performed.
+   *
+   * @param lockingScheme the locking scheme to inspect
+   */
+  public synchronized void downgradeLastWithScheme(LockingScheme lockingScheme) {
+    // Need to downgrade if the locking scheme initially desired the READ lock.
+    if (lockingScheme.getDesiredMode() == InodeTree.LockMode.READ) {
+      downgradeLast();
+      mLockMode = InodeTree.LockMode.READ;
+    }
+  }
+
+  /**
+   * Unlocks the last inode that was locked.
+   */
+  public synchronized void unlockLast() {
+    if (mInodes.isEmpty()) {
+      return;
+    }
+    mInodes.remove(mInodes.size() - 1);
+    mLockList.unlockLast();
   }
 }

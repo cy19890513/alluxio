@@ -12,9 +12,7 @@
 package alluxio.client.block.stream;
 
 import alluxio.Constants;
-import alluxio.EmbeddedChannels;
 import alluxio.client.file.FileSystemContext;
-import alluxio.client.file.options.InStreamOptions;
 import alluxio.network.protocol.RPCProtoMessage;
 import alluxio.network.protocol.databuffer.DataBuffer;
 import alluxio.network.protocol.databuffer.DataNettyBufferV2;
@@ -56,7 +54,7 @@ public final class NettyPacketReaderTest {
 
   private FileSystemContext mContext;
   private WorkerNetAddress mAddress;
-  private EmbeddedChannels.EmbeddedEmptyCtorChannel mChannel;
+  private EmbeddedChannel mChannel;
   private NettyPacketReader.Factory mFactory;
 
   @Before
@@ -65,10 +63,9 @@ public final class NettyPacketReaderTest {
     mAddress = Mockito.mock(WorkerNetAddress.class);
     Protocol.ReadRequest readRequest =
         Protocol.ReadRequest.newBuilder().setBlockId(BLOCK_ID).setPacketSize(PACKET_SIZE).build();
-    mFactory =
-        new NettyPacketReader.Factory(mContext, mAddress, readRequest, InStreamOptions.defaults());
+    mFactory = new NettyPacketReader.Factory(mContext, mAddress, readRequest);
 
-    mChannel = new EmbeddedChannels.EmbeddedEmptyCtorChannel();
+    mChannel = new EmbeddedChannel();
     PowerMockito.when(mContext.acquireNettyChannel(mAddress)).thenReturn(mChannel);
     PowerMockito.doNothing().when(mContext).releaseNettyChannel(mAddress, mChannel);
   }
@@ -154,7 +151,6 @@ public final class NettyPacketReaderTest {
    */
   private PacketReader create(long offset, long length) throws Exception {
     PacketReader reader = mFactory.create(offset, length);
-    mChannel.finishChannelCreation();
     return reader;
   }
 

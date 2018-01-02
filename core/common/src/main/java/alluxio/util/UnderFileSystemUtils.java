@@ -12,12 +12,8 @@
 package alluxio.util;
 
 import alluxio.AlluxioURI;
-import alluxio.Constants;
 import alluxio.underfs.UnderFileSystem;
 import alluxio.underfs.options.DeleteOptions;
-
-import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -81,7 +77,7 @@ public final class UnderFileSystemUtils {
         ufs.deleteFile(path);
       }
     } catch (IOException e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -107,28 +103,6 @@ public final class UnderFileSystemUtils {
    */
   public static boolean isHdfs(UnderFileSystem ufs) {
     return "hdfs".equals(ufs.getUnderFSType());
-  }
-
-  /**
-   * Returns whether the given ufs address indicates a object storage ufs.
-   * @param ufsAddress the ufs address
-   * @return true if the under file system is a object storage; false otherwise
-   */
-  public static boolean isObjectStorage(String ufsAddress) {
-    return ufsAddress.startsWith(Constants.HEADER_S3)
-        || ufsAddress.startsWith(Constants.HEADER_S3N)
-        || ufsAddress.startsWith(Constants.HEADER_S3A)
-        || ufsAddress.startsWith(Constants.HEADER_GCS)
-        || ufsAddress.startsWith(Constants.HEADER_SWIFT)
-        || ufsAddress.startsWith(Constants.HEADER_OSS);
-  }
-
-  /**
-   * @param ufs the {@link UnderFileSystem} implementation to check
-   * @return true if the implementation is an object storage implementation
-   */
-  public static boolean isObjectStorage(UnderFileSystem ufs) {
-    return isGcs(ufs) || isOss(ufs) || isS3(ufs) || isSwift(ufs);
   }
 
   /**
@@ -160,8 +134,27 @@ public final class UnderFileSystemUtils {
    * @return the bucket or container name of the object storage
    */
   public static String getBucketName(AlluxioURI uri) {
-    Preconditions.checkState(isObjectStorage(uri.toString()));
     return uri.getAuthority();
+  }
+
+  /**
+   * Returns an approximate content hash, using the length and modification time.
+   *
+   * @param length the content length
+   * @param modTime the content last modification time
+   * @return the content hash
+   */
+  public static String approximateContentHash(long length, long modTime) {
+    // approximating the content hash with the file length and modtime.
+    StringBuilder sb = new StringBuilder();
+    sb.append('(');
+    sb.append("len:");
+    sb.append(length);
+    sb.append(", ");
+    sb.append("modtime:");
+    sb.append(modTime);
+    sb.append(')');
+    return sb.toString();
   }
 
   private UnderFileSystemUtils() {} // prevent instantiation

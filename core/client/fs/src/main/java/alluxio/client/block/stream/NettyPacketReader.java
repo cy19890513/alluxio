@@ -14,7 +14,6 @@ package alluxio.client.block.stream;
 import alluxio.Configuration;
 import alluxio.PropertyKey;
 import alluxio.client.file.FileSystemContext;
-import alluxio.client.file.options.InStreamOptions;
 import alluxio.exception.status.AlluxioStatusException;
 import alluxio.exception.status.CanceledException;
 import alluxio.exception.status.DeadlineExceededException;
@@ -117,10 +116,9 @@ public final class NettyPacketReader implements PacketReader {
    * @param context the file system context
    * @param address the netty data server address
    * @param readRequest the read request
-   * @param options the in stream options
    */
   private NettyPacketReader(FileSystemContext context, WorkerNetAddress address,
-      Protocol.ReadRequest readRequest, InStreamOptions options) throws IOException {
+      Protocol.ReadRequest readRequest) throws IOException {
     mContext = context;
     mAddress = address;
     mPosToRead = readRequest.getOffset();
@@ -265,7 +263,7 @@ public final class NettyPacketReader implements PacketReader {
         // Canceled is considered a valid status and handled in the reader. We avoid creating a
         // CanceledException as an optimization.
         if (message.asResponse().getStatus() != PStatus.CANCELED) {
-          CommonUtils.unwrapResponse(response.getMessage().asResponse());
+          CommonUtils.unwrapResponseFrom(response.getMessage().asResponse(), ctx.channel());
         }
 
         DataBuffer dataBuffer = response.getPayloadDataBuffer();
@@ -288,7 +286,8 @@ public final class NettyPacketReader implements PacketReader {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-      LOG.error("Exception caught while reading from {}.", mReadRequest.getBlockId(), cause);
+      LOG.error("Exception is caught while reading block {} from channel {}:",
+          mReadRequest.getBlockId(), ctx.channel(), cause);
 
       // NOTE: The netty I/O thread associated with mChannel is the only thread that can update
       // mPacketReaderException and push to mPackets. So it is safe to do the following without
@@ -303,7 +302,8 @@ public final class NettyPacketReader implements PacketReader {
 
     @Override
     public void channelUnregistered(ChannelHandlerContext ctx) {
-      LOG.warn("Channel {} is closed while reading from {}.", mChannel, mReadRequest.getBlockId());
+      LOG.warn("Channel is closed while reading block {} from channel {}.",
+          mReadRequest.getBlockId(), ctx.channel());
 
       // NOTE: The netty I/O thread associated with mChannel is the only thread that can update
       // mPacketReaderException and push to mPackets. So it is safe to do the following without
@@ -325,7 +325,6 @@ public final class NettyPacketReader implements PacketReader {
     private final FileSystemContext mContext;
     private final WorkerNetAddress mAddress;
     private final Protocol.ReadRequest mReadRequestPartial;
-    private final InStreamOptions mOptions;
 
     /**
      * Creates an instance of {@link NettyPacketReader.Factory} for block reads.
@@ -333,20 +332,18 @@ public final class NettyPacketReader implements PacketReader {
      * @param context the file system context
      * @param address the worker address
      * @param readRequestPartial the partial read request
-     * @param options the in stream options
      */
     public Factory(FileSystemContext context, WorkerNetAddress address,
-        Protocol.ReadRequest readRequestPartial, InStreamOptions options) {
+        Protocol.ReadRequest readRequestPartial) {
       mContext = context;
       mAddress = address;
       mReadRequestPartial = readRequestPartial;
-      mOptions = options;
     }
 
     @Override
     public PacketReader create(long offset, long len) throws IOException {
       return new NettyPacketReader(mContext, mAddress,
-          mReadRequestPartial.toBuilder().setOffset(offset).setLength(len).build(), mOptions);
+          mReadRequestPartial.toBuilder().setOffset(offset).setLength(len).build());
     }
 
     @Override

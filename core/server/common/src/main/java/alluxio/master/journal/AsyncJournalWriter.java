@@ -53,7 +53,7 @@ public final class AsyncJournalWriter {
   /**
    * Creates a {@link AsyncJournalWriter}.
    *
-   * @param journalWriter the {@link JournalWriter} to use for writing
+   * @param journalWriter a journal writer to write to
    */
   public AsyncJournalWriter(JournalWriter journalWriter) {
     mJournalWriter = Preconditions.checkNotNull(journalWriter, "journalWriter");

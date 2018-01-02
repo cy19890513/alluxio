@@ -14,6 +14,8 @@ package alluxio.master.file;
 import alluxio.Constants;
 import alluxio.RpcUtils;
 import alluxio.exception.AlluxioException;
+import alluxio.exception.status.AlluxioStatusException;
+import alluxio.master.file.options.WorkerHeartbeatOptions;
 import alluxio.thrift.AlluxioTException;
 import alluxio.thrift.FileSystemHeartbeatTOptions;
 import alluxio.thrift.FileSystemHeartbeatTResponse;
@@ -32,6 +34,7 @@ import com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.List;
 
 import javax.annotation.concurrent.NotThreadSafe;
@@ -66,21 +69,23 @@ public final class FileSystemMasterWorkerServiceHandler
   public FileSystemHeartbeatTResponse fileSystemHeartbeat(final long workerId,
       final List<Long> persistedFiles, FileSystemHeartbeatTOptions options)
       throws AlluxioTException {
-    return RpcUtils.call(LOG, new RpcUtils.RpcCallable<FileSystemHeartbeatTResponse>() {
-      @Override
-      public FileSystemHeartbeatTResponse call() throws AlluxioException {
-        return new FileSystemHeartbeatTResponse(
-            mFileSystemMaster.workerHeartbeat(workerId, persistedFiles));
-      }
-    });
+    return RpcUtils.call(LOG,
+        new RpcUtils.RpcCallableThrowsIOException<FileSystemHeartbeatTResponse>() {
+          @Override
+          public FileSystemHeartbeatTResponse call() throws AlluxioException, IOException {
+            return new FileSystemHeartbeatTResponse(mFileSystemMaster
+                .workerHeartbeat(workerId, persistedFiles, new WorkerHeartbeatOptions(options)));
+          }
+        }
+    );
   }
 
   @Override
   public GetFileInfoTResponse getFileInfo(final long fileId, GetFileInfoTOptions options)
       throws AlluxioTException {
-    return RpcUtils.call(LOG, new RpcUtils.RpcCallable<GetFileInfoTResponse>() {
+    return RpcUtils.call(LOG, new RpcUtils.RpcCallableThrowsIOException<GetFileInfoTResponse>() {
       @Override
-      public GetFileInfoTResponse call() throws AlluxioException {
+      public GetFileInfoTResponse call() throws AlluxioException, AlluxioStatusException {
         return new GetFileInfoTResponse(
             ThriftUtils.toThrift(mFileSystemMaster.getFileInfo(fileId)));
       }

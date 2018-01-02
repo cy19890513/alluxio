@@ -26,7 +26,7 @@ import com.google.protobuf.MessageLite;
  * For any new proto message added here, consider adding a test in alluxio.worker.netty.CodecTest.
  */
 public final class ProtoMessage {
-  private MessageLite mMessage;
+  private final MessageLite mMessage;
 
   /**
    * Constructs a {@link ProtoMessage} instance wrapping around {@link MessageLite}.
@@ -104,6 +104,13 @@ public final class ProtoMessage {
    * @param request the local block complete request
    */
   public ProtoMessage(Protocol.LocalBlockCompleteRequest request) {
+    mMessage = request;
+  }
+
+  /**
+   * @param request the async cache request
+   */
+  public ProtoMessage(Protocol.AsyncCacheRequest request) {
     mMessage = request;
   }
 
@@ -283,6 +290,21 @@ public final class ProtoMessage {
    */
   public boolean isLocalBlockCompleteRequest() {
     return mMessage instanceof Protocol.LocalBlockCompleteRequest;
+  }
+
+  /**
+   * @return an AsyncCacheRequest object if the message is of the same type
+   */
+  public Protocol.AsyncCacheRequest asAsyncCacheRequest() {
+    Preconditions.checkState(isAsyncCacheRequest());
+    return (Protocol.AsyncCacheRequest) mMessage;
+  }
+
+  /**
+   * @return true if the message is of type AsyncCacheRequest
+   */
+  public boolean isAsyncCacheRequest() {
+    return mMessage instanceof Protocol.AsyncCacheRequest;
   }
 
   /**

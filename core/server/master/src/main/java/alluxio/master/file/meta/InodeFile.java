@@ -65,7 +65,7 @@ public final class InodeFile extends Inode<InodeFile> {
   @Override
   public FileInfo generateClientFileInfo(String path) {
     FileInfo ret = new FileInfo();
-    // note: in-memory percentage is NOT calculated here, because it needs blocks info stored in
+    // note: in-Alluxio percentage is NOT calculated here, because it needs blocks info stored in
     // block master
     ret.setFileId(getId());
     ret.setName(getName());
@@ -87,6 +87,7 @@ public final class InodeFile extends Inode<InodeFile> {
     ret.setMode(getMode());
     ret.setPersistenceState(getPersistenceState().toString());
     ret.setMountPoint(false);
+    ret.setUfsFingerprint(getUfsFingerprint());
     return ret;
   }
 
@@ -178,7 +179,7 @@ public final class InodeFile extends Inode<InodeFile> {
    * @return the updated object
    */
   public InodeFile setBlockIds(List<Long> blockIds) {
-    mBlocks = new ArrayList<>(Preconditions.checkNotNull(blockIds));
+    mBlocks = new ArrayList<>(Preconditions.checkNotNull(blockIds, "blockIds"));
     return getThis();
   }
 
@@ -278,7 +279,9 @@ public final class InodeFile extends Inode<InodeFile> {
         .setTtlAction((ProtobufUtils.fromProtobuf(entry.getTtlAction())))
         .setOwner(entry.getOwner())
         .setGroup(entry.getGroup())
-        .setMode((short) entry.getMode());
+        .setMode((short) entry.getMode())
+        .setUfsFingerprint(entry.hasUfsFingerprint() ? entry.getUfsFingerprint() :
+            Constants.INVALID_UFS_FINGERPRINT);
   }
 
   /**
@@ -327,7 +330,9 @@ public final class InodeFile extends Inode<InodeFile> {
         .setPersistenceState(getPersistenceState().name())
         .setPinned(isPinned())
         .setTtl(getTtl())
-        .setTtlAction(ProtobufUtils.toProtobuf(getTtlAction())).build();
+        .setTtlAction(ProtobufUtils.toProtobuf(getTtlAction()))
+        .setUfsFingerprint(getUfsFingerprint())
+        .build();
     return JournalEntry.newBuilder().setInodeFile(inodeFile).build();
   }
 

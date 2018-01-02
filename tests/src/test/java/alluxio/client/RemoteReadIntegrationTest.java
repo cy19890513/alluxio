@@ -14,15 +14,18 @@ package alluxio.client;
 import alluxio.AlluxioURI;
 import alluxio.BaseIntegrationTest;
 import alluxio.IntegrationTestConstants;
+import alluxio.IntegrationTestUtils;
 import alluxio.LocalAlluxioClusterResource;
 import alluxio.PropertyKey;
 import alluxio.client.block.AlluxioBlockStore;
 import alluxio.client.block.stream.BlockInStream;
+import alluxio.client.block.stream.BlockInStream.BlockInStreamSource;
 import alluxio.client.file.FileInStream;
 import alluxio.client.file.FileOutStream;
 import alluxio.client.file.FileSystem;
 import alluxio.client.file.FileSystemContext;
 import alluxio.client.file.FileSystemTestUtils;
+import alluxio.client.file.URIStatus;
 import alluxio.client.file.options.CreateFileOptions;
 import alluxio.client.file.options.InStreamOptions;
 import alluxio.client.file.options.OpenFileOptions;
@@ -47,6 +50,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -135,9 +139,9 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
       if (k == 0) {
-        Assert.assertEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+        Assert.assertEquals(100, mFileSystem.getStatus(uri).getInAlluxioPercentage());
       } else {
-        Assert.assertNotEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+        Assert.assertNotEquals(100, mFileSystem.getStatus(uri).getInAlluxioPercentage());
       }
 
       is = mFileSystem.openFile(uri, mReadCache);
@@ -153,7 +157,7 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals(cnt, k);
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
-      Assert.assertEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+      Assert.assertEquals(100, mFileSystem.getStatus(uri).getInAlluxioPercentage());
 
       is = mFileSystem.openFile(uri, mReadCache);
       ret = new byte[k];
@@ -168,7 +172,7 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals(cnt, k);
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
-      Assert.assertEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+      Assert.assertEquals(100, mFileSystem.getStatus(uri).getInAlluxioPercentage());
     }
   }
 
@@ -189,9 +193,9 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
       if (k == 0) {
-        Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+        Assert.assertTrue(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
       } else {
-        Assert.assertFalse(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+        Assert.assertFalse(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
       }
 
       is = mFileSystem.openFile(uri, mReadCache);
@@ -199,14 +203,14 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals(k, is.read(ret));
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
-      Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+      Assert.assertTrue(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
 
       is = mFileSystem.openFile(uri, mReadCache);
       ret = new byte[k];
       Assert.assertEquals(k, is.read(ret));
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
-      Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+      Assert.assertTrue(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
     }
   }
 
@@ -227,9 +231,9 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k / 2, ret));
       is.close();
       if (k == 0) {
-        Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+        Assert.assertTrue(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
       } else {
-        Assert.assertFalse(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+        Assert.assertFalse(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
       }
 
       is = mFileSystem.openFile(uri, mReadCache);
@@ -237,14 +241,14 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals(k, is.read(ret, 0, k));
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
-      Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+      Assert.assertTrue(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
 
       is = mFileSystem.openFile(uri, mReadCache);
       ret = new byte[k];
       Assert.assertEquals(k, is.read(ret));
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
-      Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+      Assert.assertTrue(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
     }
   }
 
@@ -258,13 +262,15 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       AlluxioURI uri = new AlluxioURI(uniqPath + "/file_" + k);
       FileSystemTestUtils.createByteFile(mFileSystem, uri, mWriteAlluxio, k);
 
-      long blockId = mFileSystem.getStatus(uri).getBlockIds().get(0);
+      URIStatus status = mFileSystem.getStatus(uri);
+      InStreamOptions options = new InStreamOptions(status);
+      long blockId = status.getBlockIds().get(0);
       AlluxioBlockStore blockStore = AlluxioBlockStore.create();
       BlockInfo info = blockStore.getInfo(blockId);
       WorkerNetAddress workerAddr = info.getLocations().get(0).getWorkerAddress();
-      BlockInStream is = BlockInStream
-          .create(FileSystemContext.INSTANCE, info.getBlockId(), info.getLength(), workerAddr, null,
-              InStreamOptions.defaults());
+      BlockInStream is =
+          BlockInStream.create(FileSystemContext.INSTANCE, options.getBlockInfo(blockId),
+              workerAddr, BlockInStreamSource.REMOTE, options);
       byte[] ret = new byte[k];
       int value = is.read();
       int cnt = 0;
@@ -277,7 +283,7 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals(cnt, k);
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
-      Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+      Assert.assertTrue(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
     }
   }
 
@@ -291,21 +297,20 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       AlluxioURI uri = new AlluxioURI(uniqPath + "/file_" + k);
       FileSystemTestUtils.createByteFile(mFileSystem, uri, mWriteAlluxio, k);
 
-      long blockId = mFileSystem.getStatus(uri).getBlockIds().get(0);
+      URIStatus status = mFileSystem.getStatus(uri);
+      InStreamOptions options = new InStreamOptions(status);
+      long blockId = status.getBlockIds().get(0);
       BlockInfo info = AlluxioBlockStore.create().getInfo(blockId);
       WorkerNetAddress workerAddr = info.getLocations().get(0).getWorkerAddress();
-      BlockInStream is = BlockInStream
-          .create(FileSystemContext.INSTANCE, info.getBlockId(), info.getLength(), workerAddr, null,
-              InStreamOptions.defaults());
+      BlockInStream is =
+          BlockInStream.create(FileSystemContext.INSTANCE, options.getBlockInfo(blockId),
+              workerAddr, BlockInStreamSource.REMOTE, options);
       byte[] ret = new byte[k];
-      int start = 0;
-      while (start < k) {
-        int read = is.read(ret);
-        Assert.assertTrue(BufferUtils.equalIncreasingByteArray(start, read, ret));
-        start += read;
-      }
+      int read = is.read(ret);
+      Assert
+          .assertTrue(BufferUtils.equalIncreasingByteArray(read, Arrays.copyOfRange(ret, 0, read)));
       is.close();
-      Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+      Assert.assertTrue(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
     }
   }
 
@@ -320,21 +325,22 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       AlluxioURI uri = new AlluxioURI(uniqPath + "/file_" + k);
       FileSystemTestUtils.createByteFile(mFileSystem, uri, mWriteAlluxio, k);
 
-      long blockId = mFileSystem.getStatus(uri).getBlockIds().get(0);
+      URIStatus status = mFileSystem.getStatus(uri);
+      InStreamOptions options = new InStreamOptions(status);
+      long blockId = status.getBlockIds().get(0);
       BlockInfo info = AlluxioBlockStore.create().getInfo(blockId);
       WorkerNetAddress workerAddr = info.getLocations().get(0).getWorkerAddress();
-      BlockInStream is = BlockInStream
-          .create(FileSystemContext.INSTANCE, info.getBlockId(), info.getLength(), workerAddr, null,
-              InStreamOptions.defaults());
+      BlockInStream is =
+          BlockInStream.create(FileSystemContext.INSTANCE, options.getBlockInfo(blockId),
+              workerAddr, BlockInStreamSource.REMOTE, options);
       byte[] ret = new byte[k / 2];
-      int start = 0;
-      while (start < k / 2) {
-        int read = is.read(ret, 0, (k / 2) - start);
-        Assert.assertTrue(BufferUtils.equalIncreasingByteArray(start, read, ret));
-        start += read;
+      int read = 0;
+      while (read < k / 2) {
+        read += is.read(ret, read, k / 2 - read);
       }
+      Assert.assertTrue(BufferUtils.equalIncreasingByteArray(read, ret));
       is.close();
-      Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+      Assert.assertTrue(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
     }
   }
 
@@ -355,7 +361,7 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       Assert.assertEquals(-1, is.read(ret));
       is.close();
-      Assert.assertFalse(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+      Assert.assertFalse(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
     }
   }
 
@@ -379,7 +385,7 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
     Assert.assertTrue(BufferUtils.equalIncreasingByteArray(size, ret));
     Assert.assertEquals(-1, is.read(ret));
     is.close();
-    Assert.assertFalse(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+    Assert.assertFalse(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
   }
 
   /**
@@ -456,7 +462,7 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals(k / 2, is.skip(k / 2));
       Assert.assertEquals(k / 2, is.read());
       is.close();
-      Assert.assertEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+      IntegrationTestUtils.waitForFileCached(mFileSystem, uri, 1000);
 
       if (k >= 3) {
         is = mFileSystem.openFile(uri, mReadCache);
@@ -466,7 +472,7 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
         Assert.assertEquals(t, is.skip(t));
         Assert.assertEquals(2 * t + 1, is.read());
         is.close();
-        Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+        IntegrationTestUtils.waitForFileCached(mFileSystem, uri, 1000);
       }
     }
   }
@@ -486,7 +492,7 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals(i, is.read());
     }
     is.close();
-    Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+    IntegrationTestUtils.waitForFileCached(mFileSystem, uri, 1000);
   }
 
   /**
@@ -502,7 +508,7 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
     FileInStream is = mFileSystem.openFile(uri, mReadNoCache);
     Assert.assertEquals(0, is.read());
     is.close();
-    Assert.assertFalse(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+    Assert.assertFalse(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
     is = mFileSystem.openFile(uri, mReadNoCache);
     is.close();
   }
@@ -529,7 +535,7 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals((byte) i, is.read());
     }
     is.close();
-    Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+    IntegrationTestUtils.waitForFileCached(mFileSystem, uri, 1000);
   }
 
   /**
@@ -562,13 +568,15 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       FileSystemTestUtils.createByteFile(mFileSystem, uri, mWriteAlluxio, k);
       HeartbeatScheduler.execute(HeartbeatContext.WORKER_BLOCK_SYNC);
 
-      long blockId = mFileSystem.getStatus(uri).getBlockIds().get(0);
+      URIStatus status = mFileSystem.getStatus(uri);
+      InStreamOptions options = new InStreamOptions(status);
+      long blockId = status.getBlockIds().get(0);
       BlockInfo info = AlluxioBlockStore.create().getInfo(blockId);
 
       WorkerNetAddress workerAddr = info.getLocations().get(0).getWorkerAddress();
-      BlockInStream is = BlockInStream
-          .create(FileSystemContext.INSTANCE, info.getBlockId(), info.getLength(), workerAddr, null,
-              InStreamOptions.defaults());
+      BlockInStream is =
+          BlockInStream.create(FileSystemContext.INSTANCE, options.getBlockInfo(blockId),
+              workerAddr, BlockInStreamSource.REMOTE, options);
       Assert.assertEquals(0, is.read());
       mFileSystem.delete(uri);
       HeartbeatScheduler.execute(HeartbeatContext.WORKER_BLOCK_SYNC);
@@ -577,16 +585,15 @@ public class RemoteReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertFalse(mFileSystem.exists(uri));
       // Look! We can still read the deleted file since we have a lock!
       byte[] ret = new byte[k / 2];
-      Assert.assertEquals(k / 2, is.read(ret, 0, k / 2));
+      Assert.assertTrue(is.read(ret, 0, k / 2) > 0);
       is.close();
       Assert.assertFalse(mFileSystem.exists(uri));
 
       // Try to create an in stream again, and it should fail.
       BlockInStream is2 = null;
       try {
-        is2 = BlockInStream
-            .create(FileSystemContext.INSTANCE, info.getBlockId(), info.getLength(), workerAddr,
-                null, InStreamOptions.defaults());
+        is2 = BlockInStream.create(FileSystemContext.INSTANCE, options.getBlockInfo(blockId),
+            workerAddr, BlockInStreamSource.REMOTE, options);
       } catch (NotFoundException e) {
         // Expected since the file has been deleted.
       } finally {

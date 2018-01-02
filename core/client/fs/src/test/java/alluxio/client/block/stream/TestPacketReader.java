@@ -16,6 +16,8 @@ import alluxio.network.protocol.databuffer.DataByteBuffer;
 
 import java.nio.ByteBuffer;
 
+import javax.annotation.Nullable;
+
 /**
  * A {@link PacketReader} which serves data from a given byte array.
  */
@@ -32,12 +34,13 @@ public class TestPacketReader implements PacketReader {
   }
 
   @Override
+  @Nullable
   public DataBuffer readPacket() {
-    if (mPos >= mEnd) {
+    if (mPos >= mEnd || mPos >= mData.length) {
       return null;
     }
-    ByteBuffer buffer =
-        ByteBuffer.wrap(mData, (int) mPos, (int) (Math.min(mPacketSize, mEnd - mPos)));
+    int bytesToRead = (int) (Math.min(Math.min(mPacketSize, mEnd - mPos), mData.length - mPos));
+    ByteBuffer buffer = ByteBuffer.wrap(mData, (int) mPos, bytesToRead);
     DataBuffer dataBuffer = new DataByteBuffer(buffer, buffer.remaining());
     mPos += dataBuffer.getLength();
     return dataBuffer;

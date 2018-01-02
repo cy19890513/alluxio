@@ -18,18 +18,13 @@ priority: 1
 
 首先，在你的机器上必须安装Alluxio二进制包。你可以自己[编译Alluxio](Building-Alluxio-Master-Branch.html)，或者[下载二进制包](Running-Alluxio-Locally.html)
 
-接着，如果还没有配置，请用‘bootstrapConf'命令创建自己的配置。
-例如，如果你在本地机器运行Alluxio，就需要将`ALLUXIO_MASTER_HOSTNAME`设置为`localhost`
-
-{% include Configuring-Alluxio-with-GCS/bootstrapConf.md %}
-
-或者，您也可以从模板创建配置文件并手动设置内容。
-
-{% include Common-Commands/copy-alluxio-env.md %}
-
 ## 配置Alluxio
 
-为了配置Alluxio以使用Ceph作为其底层文件系统，需要修改`conf/alluxio-env.sh`文件
+为了配置Alluxio以使用底层文件系统，需要修改`alluxio-site.properties`文件。如果该文件不存在，根据模板创建配置文件。
+
+```bash
+$ cp conf/alluxio-site.properties.template conf/alluxio-site.properties
+```
 
 ### 方法1: S3A接口
 
@@ -54,8 +49,6 @@ priority: 1
 
 `<swift-use-public>`可能的值为`true`，`false`。如果使用本地的Ceph RGW认证，指定`<swift-auth-model>`为`swiftauth`。指定
 `<swift-auth-url>`为`http://<rgw-hostname>:8090/auth/1.0`
-
-或者，你也可以在`conf/alluxio-env.sh`文件中设置这些配置，更多的参数配置细节可以查阅[Configuration Settings](Configuration-Settings.html#environment-variables)
 
 ## 使用Ceph本地运行Alluxio
 

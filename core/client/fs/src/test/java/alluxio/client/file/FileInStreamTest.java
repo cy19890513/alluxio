@@ -11,60 +11,89 @@
 
 package alluxio.client.file;
 
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
+
 import alluxio.client.ReadType;
 import alluxio.client.block.AlluxioBlockStore;
 import alluxio.client.block.BlockWorkerInfo;
 import alluxio.client.block.stream.BlockInStream;
-import alluxio.client.block.stream.BlockOutStream;
+import alluxio.client.block.stream.BlockInStream.BlockInStreamSource;
 import alluxio.client.block.stream.TestBlockInStream;
-import alluxio.client.block.stream.TestBlockOutStream;
 import alluxio.client.file.options.InStreamOptions;
-import alluxio.client.file.options.OutStreamOptions;
+import alluxio.client.file.options.OpenFileOptions;
 import alluxio.client.util.ClientTestUtils;
 import alluxio.exception.PreconditionMessage;
 import alluxio.exception.status.UnavailableException;
-import alluxio.proto.dataserver.Protocol;
 import alluxio.util.io.BufferUtils;
+import alluxio.wire.BlockInfo;
+import alluxio.wire.FileBlockInfo;
 import alluxio.wire.FileInfo;
 import alluxio.wire.WorkerNetAddress;
 
 import org.junit.After;
-import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 import org.powermock.api.mockito.PowerMockito;
 import org.powermock.core.classloader.annotations.PrepareForTest;
-import org.powermock.modules.junit4.PowerMockRunner;
+import org.powermock.modules.junit4.rule.PowerMockRule;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 
 /**
  * Tests for the {@link FileInStream} class.
+ *
+ * It is a parameterized test that checks different caching behaviors when the blocks are located at
+ * different locations.
  */
-@RunWith(PowerMockRunner.class)
+@RunWith(Parameterized.class)
 @PrepareForTest({FileSystemContext.class, AlluxioBlockStore.class})
-public class FileInStreamTest {
-
+public final class FileInStreamTest {
+  @Rule
+  public PowerMockRule mPowerMockRule = new PowerMockRule();
   private static final long BLOCK_LENGTH = 100L;
   private static final long FILE_LENGTH = 350L;
   private static final long NUM_STREAMS = ((FILE_LENGTH - 1) / BLOCK_LENGTH) + 1;
 
   private AlluxioBlockStore mBlockStore;
+  private BlockInStreamSource mBlockSource;
   private FileSystemContext mContext;
   private FileInfo mInfo;
   private URIStatus mStatus;
 
-  private List<TestBlockOutStream> mCacheStreams;
+  private List<TestBlockInStream> mInStreams;
 
   private FileInStream mTestStream;
+
+  /**
+   * @return a list of all sources of where the blocks reside
+   */
+  @Parameterized.Parameters
+  public static Collection<Object[]> data() {
+    return Arrays.asList(new Object[][] {
+      {BlockInStreamSource.LOCAL},
+      {BlockInStreamSource.UFS},
+      {BlockInStreamSource.REMOTE}
+    });
+  }
+
+  /**
+   * @param blockSource the source of the block to read
+   */
+  public FileInStreamTest(BlockInStreamSource blockSource) {
+    mBlockSource = blockSource;
+  }
 
   private long getBlockLength(int streamId) {
     return streamId == NUM_STREAMS - 1 ? 50 : BLOCK_LENGTH;
@@ -84,44 +113,39 @@ public class FileInStreamTest {
     mBlockStore = Mockito.mock(AlluxioBlockStore.class);
     PowerMockito.mockStatic(AlluxioBlockStore.class);
     PowerMockito.when(AlluxioBlockStore.create(mContext)).thenReturn(mBlockStore);
-    PowerMockito.when(mBlockStore.getWorkerInfoList()).thenReturn(new ArrayList<BlockWorkerInfo>());
+    PowerMockito.when(mBlockStore.getEligibleWorkers()).thenReturn(new ArrayList<>());
 
     // Set up BufferedBlockInStreams and caching streams
-    mCacheStreams = new ArrayList<>();
+    mInStreams = new ArrayList<>();
     List<Long> blockIds = new ArrayList<>();
+    List<FileBlockInfo> fileBlockInfos = new ArrayList<>();
     for (int i = 0; i < NUM_STREAMS; i++) {
       blockIds.add((long) i);
-      mCacheStreams.add(new TestBlockOutStream(ByteBuffer.allocate(1000), getBlockLength(i)));
-      Mockito.when(mBlockStore.getWorkerInfoList())
+      FileBlockInfo fbInfo = new FileBlockInfo().setBlockInfo(new BlockInfo().setBlockId(i));
+      fileBlockInfos.add(fbInfo);
+      final byte[] input = BufferUtils
+          .getIncreasingByteArray((int) (i * BLOCK_LENGTH), (int) getBlockLength(i));
+      mInStreams.add(new TestBlockInStream(input, i, input.length, false, mBlockSource));
+      Mockito.when(mBlockStore.getEligibleWorkers())
           .thenReturn(Arrays.asList(new BlockWorkerInfo(new WorkerNetAddress(), 0, 0)));
-      Mockito
-          .when(mBlockStore.getInStream(Mockito.eq((long) i), Mockito.any(
-              Protocol.OpenUfsBlockOptions.class), Mockito.any(InStreamOptions.class)))
+      Mockito.when(mBlockStore.getInStream(Mockito.eq(fbInfo.getBlockInfo()),
+          Mockito.any(InStreamOptions.class)))
           .thenAnswer(new Answer<BlockInStream>() {
             @Override
             public BlockInStream answer(InvocationOnMock invocation) throws Throwable {
-              long i = (Long) invocation.getArguments()[0];
-              byte[] input = BufferUtils
-                  .getIncreasingByteArray((int) (i * BLOCK_LENGTH), (int) getBlockLength((int) i));
-              return new TestBlockInStream(input, i, input.length, false);
-            }
-          });
-      Mockito.when(mBlockStore.getOutStream(Mockito.eq((long) i), Mockito.anyLong(),
-          Mockito.any(WorkerNetAddress.class), Mockito.any(OutStreamOptions.class)))
-          .thenAnswer(new Answer<BlockOutStream>() {
-            @Override
-            public BlockOutStream answer(InvocationOnMock invocation) throws Throwable {
-              long i = (Long) invocation.getArguments()[0];
-              return mCacheStreams.get((int) i).isClosed() ? null : mCacheStreams.get((int) i);
+              BlockInfo info = (BlockInfo) invocation.getArguments()[0];
+              long i = info == null ? 0 : info.getBlockId();
+              return mInStreams.get((int) i).isClosed() ? new TestBlockInStream(input, i,
+                  input.length, false, mBlockSource) : mInStreams.get((int) i);
             }
           });
     }
     mInfo.setBlockIds(blockIds);
+    mInfo.setFileBlockInfos(fileBlockInfos);
     mStatus = new URIStatus(mInfo);
 
-    mTestStream =
-        new FileInStream(mStatus, InStreamOptions.defaults().setReadType(ReadType.CACHE_PROMOTE)
-            .setCachePartiallyReadBlock(false), mContext);
+    OpenFileOptions readOptions = OpenFileOptions.defaults().setReadType(ReadType.CACHE_PROMOTE);
+    mTestStream = new FileInStream(mStatus, new InStreamOptions(mStatus, readOptions), mContext);
   }
 
   @After
@@ -135,10 +159,9 @@ public class FileInStreamTest {
   @Test
   public void singleByteRead() throws Exception {
     for (int i = 0; i < FILE_LENGTH; i++) {
-      Assert.assertEquals(i & 0xff, mTestStream.read());
+      assertEquals(i & 0xff, mTestStream.read());
     }
     mTestStream.close();
-    verifyCacheStreams(FILE_LENGTH);
   }
 
   /**
@@ -185,7 +208,7 @@ public class FileInStreamTest {
     byte[] expectedBuffer = new byte[offset + len];
     System.arraycopy(BufferUtils.getIncreasingByteArray(len), 0, expectedBuffer, offset, len);
     mTestStream.read(buffer, offset, len);
-    Assert.assertArrayEquals(expectedBuffer, buffer);
+    assertArrayEquals(expectedBuffer, buffer);
   }
 
   /**
@@ -195,16 +218,15 @@ public class FileInStreamTest {
   public void readManyChunks() throws IOException {
     int chunksize = 10;
     // chunksize must divide FILE_LENGTH evenly for this test to work
-    Assert.assertEquals(0, FILE_LENGTH % chunksize);
+    assertEquals(0, FILE_LENGTH % chunksize);
     byte[] buffer = new byte[chunksize];
     int offset = 0;
     for (int i = 0; i < FILE_LENGTH / chunksize; i++) {
       mTestStream.read(buffer, 0, chunksize);
-      Assert.assertArrayEquals(BufferUtils.getIncreasingByteArray(offset, chunksize), buffer);
+      assertArrayEquals(BufferUtils.getIncreasingByteArray(offset, chunksize), buffer);
       offset += chunksize;
     }
     mTestStream.close();
-    verifyCacheStreams(FILE_LENGTH);
   }
 
   /**
@@ -213,17 +235,17 @@ public class FileInStreamTest {
    */
   @Test
   public void testRemaining() throws IOException {
-    Assert.assertEquals(FILE_LENGTH, mTestStream.remaining());
+    assertEquals(FILE_LENGTH, mTestStream.remaining());
     mTestStream.read();
-    Assert.assertEquals(FILE_LENGTH - 1, mTestStream.remaining());
+    assertEquals(FILE_LENGTH - 1, mTestStream.remaining());
     mTestStream.read(new byte[150]);
-    Assert.assertEquals(FILE_LENGTH - 151, mTestStream.remaining());
+    assertEquals(FILE_LENGTH - 151, mTestStream.remaining());
     mTestStream.skip(140);
-    Assert.assertEquals(FILE_LENGTH - 291, mTestStream.remaining());
+    assertEquals(FILE_LENGTH - 291, mTestStream.remaining());
     mTestStream.seek(310);
-    Assert.assertEquals(FILE_LENGTH - 310, mTestStream.remaining());
+    assertEquals(FILE_LENGTH - 310, mTestStream.remaining());
     mTestStream.seek(130);
-    Assert.assertEquals(FILE_LENGTH - 130, mTestStream.remaining());
+    assertEquals(FILE_LENGTH - 130, mTestStream.remaining());
   }
 
   /**
@@ -239,19 +261,63 @@ public class FileInStreamTest {
     mTestStream.seek(seekAmount);
     // Read two blocks from 0.5 to 2.5
     mTestStream.read(buffer);
-    Assert.assertArrayEquals(BufferUtils.getIncreasingByteArray(seekAmount, readAmount), buffer);
-    // First block should not be cached since we skipped over it, but the second should be
-    Assert.assertEquals(0, mCacheStreams.get(0).getWrittenData().length);
-    Assert.assertArrayEquals(
-        BufferUtils.getIncreasingByteArray((int) BLOCK_LENGTH, (int) BLOCK_LENGTH),
-        mCacheStreams.get(1).getWrittenData());
+    assertArrayEquals(BufferUtils.getIncreasingByteArray(seekAmount, readAmount), buffer);
+
+    // second block is cached if the block is not local
+    byte[] expected = mBlockSource != BlockInStreamSource.REMOTE ? new byte[0]
+        : BufferUtils.getIncreasingByteArray((int) BLOCK_LENGTH, (int) BLOCK_LENGTH);
 
     // Seek to current position (does nothing)
     mTestStream.seek(seekAmount + readAmount);
     // Seek a short way past start of block 3
     mTestStream.seek((long) (BLOCK_LENGTH * 3.1));
-    Assert.assertEquals((byte) (BLOCK_LENGTH * 3.1), mTestStream.read());
+    assertEquals((byte) (BLOCK_LENGTH * 3.1), mTestStream.read());
     mTestStream.seek(FILE_LENGTH);
+  }
+
+  /**
+   * Tests seeking back to the beginning of a block after the block's remaining is 0.
+   */
+  @Test
+  public void seekToBeginningAfterReadingWholeBlock() throws IOException {
+    // Read the whole block.
+    int blockSize = (int) BLOCK_LENGTH;
+    byte[] block = new byte[blockSize];
+    mTestStream.read(block);
+    assertArrayEquals(BufferUtils.getIncreasingByteArray(0, blockSize), block);
+
+    // Seek to the beginning of the current block, then read half of it.
+    mTestStream.seek(0);
+    int halfBlockSize = blockSize / 2;
+    byte[] halfBlock = new byte[halfBlockSize];
+    mTestStream.read(halfBlock);
+    assertArrayEquals(BufferUtils.getIncreasingByteArray(0, halfBlockSize), halfBlock);
+  }
+
+  /**
+   * Tests seeking to the beginning of the last block after reaching EOF.
+   */
+  @Test
+  public void seekToLastBlockAfterReachingEOF() throws IOException {
+    mTestStream.read(new byte[(int) FILE_LENGTH]);
+    mTestStream.seek(FILE_LENGTH - BLOCK_LENGTH);
+    byte[] block = new byte[(int) BLOCK_LENGTH];
+    mTestStream.read(block);
+    assertArrayEquals(BufferUtils.getIncreasingByteArray(
+        (int) (FILE_LENGTH - BLOCK_LENGTH), (int) BLOCK_LENGTH), block);
+  }
+
+  /**
+   * Tests seeking to EOF, then seeking to position 0 and read the whole file.
+   */
+  @Test
+  public void seekToEOFBeforeReadingFirstBlock() throws IOException {
+    mTestStream.seek(FILE_LENGTH);
+    mTestStream.seek(0);
+    byte[] block = new byte[(int) BLOCK_LENGTH];
+    mTestStream.read(block);
+    assertArrayEquals(
+        BufferUtils.getIncreasingByteArray(0, (int) BLOCK_LENGTH), block);
   }
 
   /**
@@ -259,9 +325,8 @@ public class FileInStreamTest {
    */
   @Test
   public void longSeekBackwardCachingPartiallyReadBlocks() throws IOException {
-    mTestStream = new FileInStream(mStatus,
-        InStreamOptions.defaults().setReadType(ReadType.CACHE_PROMOTE)
-            .setCachePartiallyReadBlock(true), mContext);
+    OpenFileOptions options = OpenFileOptions.defaults().setReadType(ReadType.CACHE_PROMOTE);
+    mTestStream = new FileInStream(mStatus, new InStreamOptions(mStatus, options), mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 4 + BLOCK_LENGTH);
     int readAmount = (int) (BLOCK_LENGTH * 3 - BLOCK_LENGTH / 2);
     byte[] buffer = new byte[readAmount];
@@ -271,9 +336,41 @@ public class FileInStreamTest {
     mTestStream.seek(readAmount - seekAmount);
 
     // Block 2 is cached though it is not fully read.
-    Assert.assertArrayEquals(
-        BufferUtils.getIncreasingByteArray(2 * (int) BLOCK_LENGTH, (int) BLOCK_LENGTH),
-        mCacheStreams.get(2).getWrittenData());
+    validatePartialCaching(2, (int) BLOCK_LENGTH / 2);
+  }
+
+  /**
+   * Tests reading and seeking with no local worker. Nothing should be cached.
+   */
+  @Test
+  public void testSeekWithNoLocalWorker() throws IOException {
+    // Overrides the get local worker call
+    PowerMockito.when(mContext.getLocalWorker()).thenReturn(null);
+    OpenFileOptions options = OpenFileOptions.defaults().setReadType(ReadType.CACHE_PROMOTE);
+    mTestStream = new FileInStream(mStatus, new InStreamOptions(mStatus, options), mContext);
+    int readAmount = (int) (BLOCK_LENGTH / 2);
+    byte[] buffer = new byte[readAmount];
+    // read and seek several times
+    mTestStream.read(buffer);
+    assertEquals(readAmount, mInStreams.get(0).getBytesRead());
+    mTestStream.seek(BLOCK_LENGTH + BLOCK_LENGTH / 2);
+    mTestStream.seek(0);
+
+    // only reads the read amount, regardless of block source
+    assertEquals(readAmount, mInStreams.get(0).getBytesRead());
+    assertEquals(0, mInStreams.get(1).getBytesRead());
+  }
+
+  @Test
+  public void seekAndClose() throws IOException {
+    OpenFileOptions options = OpenFileOptions.defaults().setReadType(ReadType.CACHE_PROMOTE);
+    mTestStream = new FileInStream(mStatus, new InStreamOptions(mStatus, options), mContext);
+    int seekAmount = (int) (BLOCK_LENGTH / 2);
+    mTestStream.seek(seekAmount);
+    mTestStream.close();
+
+    // Block 0 is cached though it is not fully read.
+    validatePartialCaching(0, 0);
   }
 
   /**
@@ -281,9 +378,8 @@ public class FileInStreamTest {
    */
   @Test
   public void shortSeekBackwardCachingPartiallyReadBlocks() throws IOException {
-    mTestStream = new FileInStream(mStatus,
-        InStreamOptions.defaults().setReadType(ReadType.CACHE_PROMOTE)
-            .setCachePartiallyReadBlock(true), mContext);
+    OpenFileOptions options = OpenFileOptions.defaults().setReadType(ReadType.CACHE_PROMOTE);
+    mTestStream = new FileInStream(mStatus, new InStreamOptions(mStatus, options), mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 4);
     int readAmount = (int) (BLOCK_LENGTH * 2 - BLOCK_LENGTH / 2);
     byte[] buffer = new byte[readAmount];
@@ -293,17 +389,13 @@ public class FileInStreamTest {
     mTestStream.seek(readAmount - seekAmount);
 
     // Block 1 is cached though it is not fully read.
-    Assert.assertArrayEquals(
-        BufferUtils.getIncreasingByteArray((int) BLOCK_LENGTH, (int) BLOCK_LENGTH),
-        mCacheStreams.get(1).getWrittenData());
+    validatePartialCaching(1, (int) BLOCK_LENGTH / 2);
 
     // Seek many times. It will cache block 1 only once.
     for (int i = 0; i <= seekAmount; i++) {
       mTestStream.seek(readAmount - seekAmount - i);
     }
-    Assert.assertArrayEquals(
-        BufferUtils.getIncreasingByteArray((int) BLOCK_LENGTH, (int) BLOCK_LENGTH),
-        mCacheStreams.get(1).getWrittenData());
+    validatePartialCaching(1, (int) BLOCK_LENGTH / 2);
   }
 
   /**
@@ -311,9 +403,8 @@ public class FileInStreamTest {
    */
   @Test
   public void longSeekForwardCachingPartiallyReadBlocks() throws IOException {
-    mTestStream = new FileInStream(mStatus,
-        InStreamOptions.defaults().setReadType(ReadType.CACHE_PROMOTE)
-            .setCachePartiallyReadBlock(true), mContext);
+    OpenFileOptions options = OpenFileOptions.defaults().setReadType(ReadType.CACHE_PROMOTE);
+    mTestStream = new FileInStream(mStatus, new InStreamOptions(mStatus, options), mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 4 + BLOCK_LENGTH);
     int readAmount = (int) (BLOCK_LENGTH / 2);
     byte[] buffer = new byte[readAmount];
@@ -323,13 +414,12 @@ public class FileInStreamTest {
     mTestStream.seek(readAmount + seekAmount);
 
     // Block 0 is cached though it is not fully read.
-    Assert.assertArrayEquals(BufferUtils.getIncreasingByteArray(0, (int) BLOCK_LENGTH),
-        mCacheStreams.get(0).getWrittenData());
+    validatePartialCaching(0, readAmount);
+
     // Block 1 is being cached though its prefix it not read.
-    Assert.assertArrayEquals(
-        BufferUtils.getIncreasingByteArray((int) BLOCK_LENGTH, (int) BLOCK_LENGTH / 4 * 3),
-        mCacheStreams.get(1).getWrittenData());
-    mTestStream.seek(FILE_LENGTH);
+    validatePartialCaching(1, 0);
+    mTestStream.close();
+    validatePartialCaching(1, 0);
   }
 
   /**
@@ -337,9 +427,8 @@ public class FileInStreamTest {
    */
   @Test
   public void shortSeekForwardCachingPartiallyReadBlocks() throws IOException {
-    mTestStream = new FileInStream(mStatus,
-        InStreamOptions.defaults().setReadType(ReadType.CACHE_PROMOTE)
-            .setCachePartiallyReadBlock(true), mContext);
+    OpenFileOptions options = OpenFileOptions.defaults().setReadType(ReadType.CACHE_PROMOTE);
+    mTestStream = new FileInStream(mStatus, new InStreamOptions(mStatus, options), mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 4);
     int readAmount = (int) (BLOCK_LENGTH * 2 - BLOCK_LENGTH / 2);
     byte[] buffer = new byte[readAmount];
@@ -349,16 +438,12 @@ public class FileInStreamTest {
     mTestStream.seek(readAmount + seekAmount);
 
     // Block 1 (till seek pos) is being cached.
-    Assert.assertArrayEquals(
-        BufferUtils.getIncreasingByteArray((int) BLOCK_LENGTH, (int) BLOCK_LENGTH / 4 * 3),
-        mCacheStreams.get(1).getWrittenData());
+    validatePartialCaching(1, (int) BLOCK_LENGTH / 2);
 
     // Seek forward many times. The prefix is always cached.
     for (int i = 0; i < seekAmount; i++) {
       mTestStream.seek(readAmount + seekAmount + i);
-      Assert.assertArrayEquals(BufferUtils
-              .getIncreasingByteArray((int) BLOCK_LENGTH, (int) BLOCK_LENGTH / 2 + seekAmount + i),
-          mCacheStreams.get(1).getWrittenData());
+      validatePartialCaching(1, (int) BLOCK_LENGTH / 2);
     }
   }
 
@@ -367,18 +452,15 @@ public class FileInStreamTest {
    */
   @Test
   public void seekBackwardSmallSeekBuffer() throws IOException {
-    mTestStream = new FileInStream(mStatus,
-        InStreamOptions.defaults().setCachePartiallyReadBlock(true)
-            .setReadType(ReadType.CACHE_PROMOTE).setSeekBufferSizeBytes(7), mContext);
+    OpenFileOptions options = OpenFileOptions.defaults().setReadType(ReadType.CACHE_PROMOTE);
+    mTestStream = new FileInStream(mStatus, new InStreamOptions(mStatus, options), mContext);
     int readAmount = (int) (BLOCK_LENGTH / 2);
     byte[] buffer = new byte[readAmount];
     mTestStream.read(buffer);
 
     mTestStream.seek(readAmount - 1);
 
-    Assert.assertArrayEquals(BufferUtils.getIncreasingByteArray(0, (int) BLOCK_LENGTH),
-        mCacheStreams.get(0).getWrittenData());
-    Assert.assertEquals(0, mCacheStreams.get(1).getWrittenData().length);
+    validatePartialCaching(0, readAmount);
   }
 
   /**
@@ -387,23 +469,26 @@ public class FileInStreamTest {
    */
   @Test
   public void seekBackwardToFileBeginning() throws IOException {
-    mTestStream = new FileInStream(mStatus,
-        InStreamOptions.defaults().setReadType(ReadType.CACHE_PROMOTE)
-            .setCachePartiallyReadBlock(true), mContext);
+    OpenFileOptions options = OpenFileOptions.defaults().setReadType(ReadType.CACHE_PROMOTE);
+    mTestStream = new FileInStream(mStatus, new InStreamOptions(mStatus, options), mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 4 + BLOCK_LENGTH);
 
     // Seek forward.
     mTestStream.seek(seekAmount);
+
+    // Block 1 is partially cached though it is not fully read.
+    validatePartialCaching(1, 0);
+
     // Seek backward.
     mTestStream.seek(0);
+
+    // Block 1 is fully cached though it is not fully read.
+    validatePartialCaching(1, 0);
+
     mTestStream.close();
 
-    // Block 1 is cached though it is not fully read.
-    Assert.assertArrayEquals(
-        BufferUtils.getIncreasingByteArray((int) BLOCK_LENGTH, (int) BLOCK_LENGTH),
-        mCacheStreams.get(1).getWrittenData());
-    // Block 0 is not cached.
-    Assert.assertEquals(0, mCacheStreams.get(0).getWrittenData().length);
+    // block 0 is cached
+    validatePartialCaching(0, 0);
   }
 
   /**
@@ -419,17 +504,12 @@ public class FileInStreamTest {
     mTestStream.skip(skipAmount);
     // Read two blocks from 0.5 to 2.5
     mTestStream.read(buffer);
-    Assert.assertArrayEquals(BufferUtils.getIncreasingByteArray(skipAmount, readAmount), buffer);
-    // First block should not be cached since we skipped into it, but the second should be
-    Assert.assertEquals(0, mCacheStreams.get(0).getWrittenData().length);
-    Assert.assertArrayEquals(
-        BufferUtils.getIncreasingByteArray((int) BLOCK_LENGTH, (int) BLOCK_LENGTH),
-        mCacheStreams.get(1).getWrittenData());
+    assertArrayEquals(BufferUtils.getIncreasingByteArray(skipAmount, readAmount), buffer);
 
-    Assert.assertEquals(0, mTestStream.skip(0));
+    assertEquals(0, mTestStream.skip(0));
     // Skip the next half block, bringing us to block 3
-    Assert.assertEquals(BLOCK_LENGTH / 2, mTestStream.skip(BLOCK_LENGTH / 2));
-    Assert.assertEquals((byte) (BLOCK_LENGTH * 3), mTestStream.read());
+    assertEquals(BLOCK_LENGTH / 2, mTestStream.skip(BLOCK_LENGTH / 2));
+    assertEquals((byte) (BLOCK_LENGTH * 3), mTestStream.read());
   }
 
   /**
@@ -439,15 +519,13 @@ public class FileInStreamTest {
   @Test
   public void failGetInStream() throws IOException {
     Mockito.when(mBlockStore
-        .getInStream(Mockito.eq(1L), Mockito.any(Protocol.OpenUfsBlockOptions.class),
-            Mockito.any(InStreamOptions.class)))
+        .getInStream(Mockito.any(BlockInfo.class), Mockito.any(InStreamOptions.class)))
         .thenThrow(new UnavailableException("test exception"));
-
     try {
-      mTestStream.seek(BLOCK_LENGTH);
-      Assert.fail("block store should throw exception");
+      mTestStream.read();
+      fail("block store should throw exception");
     } catch (IOException e) {
-      Assert.assertEquals("test exception", e.getMessage());
+      assertEquals("test exception", e.getMessage());
     }
   }
 
@@ -457,8 +535,8 @@ public class FileInStreamTest {
   @Test
   public void readOutOfBounds() throws IOException {
     mTestStream.read(new byte[(int) FILE_LENGTH]);
-    Assert.assertEquals(-1, mTestStream.read());
-    Assert.assertEquals(-1, mTestStream.read(new byte[10]));
+    assertEquals(-1, mTestStream.read());
+    assertEquals(-1, mTestStream.read(new byte[10]));
   }
 
   /**
@@ -468,9 +546,9 @@ public class FileInStreamTest {
   public void readBadBuffer() throws IOException {
     try {
       mTestStream.read(new byte[10], 5, 6);
-      Assert.fail("the buffer read of invalid offset/length should fail");
+      fail("the buffer read of invalid offset/length should fail");
     } catch (IllegalArgumentException e) {
-      Assert.assertEquals(String.format(PreconditionMessage.ERR_BUFFER_STATE.toString(), 10, 5, 6),
+      assertEquals(String.format(PreconditionMessage.ERR_BUFFER_STATE.toString(), 10, 5, 6),
           e.getMessage());
     }
   }
@@ -482,9 +560,9 @@ public class FileInStreamTest {
   public void seekNegative() throws IOException {
     try {
       mTestStream.seek(-1);
-      Assert.fail("seeking negative position should fail");
+      fail("seeking negative position should fail");
     } catch (IllegalArgumentException e) {
-      Assert.assertEquals(String.format(PreconditionMessage.ERR_SEEK_NEGATIVE.toString(), -1),
+      assertEquals(String.format(PreconditionMessage.ERR_SEEK_NEGATIVE.toString(), -1),
           e.getMessage());
     }
   }
@@ -496,9 +574,9 @@ public class FileInStreamTest {
   public void seekPastEnd() throws IOException {
     try {
       mTestStream.seek(FILE_LENGTH + 1);
-      Assert.fail("seeking past the end of the stream should fail");
+      fail("seeking past the end of the stream should fail");
     } catch (IllegalArgumentException e) {
-      Assert.assertEquals(String.format(PreconditionMessage.ERR_SEEK_PAST_END_OF_FILE.toString(),
+      assertEquals(String.format(PreconditionMessage.ERR_SEEK_PAST_END_OF_FILE.toString(),
           FILE_LENGTH + 1), e.getMessage());
     }
   }
@@ -508,20 +586,46 @@ public class FileInStreamTest {
    */
   @Test
   public void skipNegative() throws IOException {
-    Assert.assertEquals(0, mTestStream.skip(-10));
+    assertEquals(0, mTestStream.skip(-10));
+  }
+
+  @Test
+  public void positionedRead() throws IOException {
+    byte[] b = new byte[(int) BLOCK_LENGTH];
+    mTestStream.positionedRead(BLOCK_LENGTH, b, 0, b.length);
+    assertArrayEquals(BufferUtils.getIncreasingByteArray((int) BLOCK_LENGTH, (int)
+        BLOCK_LENGTH), b);
+  }
+
+  @Test
+  public void multiBlockPositionedRead() throws IOException {
+    byte[] b = new byte[(int) BLOCK_LENGTH * 2];
+    mTestStream.positionedRead(BLOCK_LENGTH / 2, b, 0, b.length);
+    assertArrayEquals(BufferUtils.getIncreasingByteArray((int) BLOCK_LENGTH / 2, (int)
+        BLOCK_LENGTH * 2), b);
   }
 
   /**
-   * Tests that the correct exception message is produced when the location policy is not specified.
+   * Tests that when the underlying blocks are inconsistent with the metadata in terms of block
+   * length, an exception is thrown rather than client hanging indefinitely. This case may happen if
+   * the file in Alluxio and UFS is out of sync.
    */
   @Test
-  public void missingLocationPolicy() {
+  public void blockInStreamOutOfSync() throws Exception {
+    Mockito.when(
+        mBlockStore.getInStream(Mockito.any(BlockInfo.class), Mockito.any(InStreamOptions.class)))
+        .thenAnswer(new Answer<BlockInStream>() {
+          @Override
+          public BlockInStream answer(InvocationOnMock invocation) throws Throwable {
+            return new TestBlockInStream(new byte[1], 0, BLOCK_LENGTH, false, mBlockSource);
+          }
+        });
+    byte[] buffer = new byte[(int) BLOCK_LENGTH];
     try {
-      mTestStream = new FileInStream(mStatus,
-          InStreamOptions.defaults().setReadType(ReadType.CACHE).setLocationPolicy(null), mContext);
-    } catch (NullPointerException e) {
-      Assert.assertEquals(PreconditionMessage.FILE_WRITE_LOCATION_POLICY_UNSPECIFIED.toString(),
-          e.getMessage());
+      mTestStream.read(buffer, 0, (int) BLOCK_LENGTH);
+      fail("BlockInStream is inconsistent, an Exception is expected");
+    } catch (IllegalStateException e) {
+      // expect an exception to throw
     }
   }
 
@@ -536,28 +640,16 @@ public class FileInStreamTest {
     mTestStream.read(buffer);
     mTestStream.close();
 
-    Assert.assertArrayEquals(BufferUtils.getIncreasingByteArray(dataRead), buffer);
-    int cachedData = (int) ((dataRead / BLOCK_LENGTH) * BLOCK_LENGTH);
-    verifyCacheStreams(cachedData);
+    assertArrayEquals(BufferUtils.getIncreasingByteArray(dataRead), buffer);
   }
 
   /**
-   * Verifies that data was properly written to the cache streams.
-   *
-   * @param dataRead the bytes to read
+   * Validates the partial caching behavior. This function
+   * verifies the block at the given index is read for the given sizes.
    */
-  private void verifyCacheStreams(long dataRead) {
-    for (int streamIndex = 0; streamIndex < NUM_STREAMS; streamIndex++) {
-      TestBlockOutStream stream = mCacheStreams.get(streamIndex);
-      byte[] data = stream.getWrittenData();
-      if (streamIndex * BLOCK_LENGTH > dataRead) {
-        Assert.assertEquals(0, data.length);
-      } else {
-        long dataStart = streamIndex * BLOCK_LENGTH;
-        for (int i = 0; i < BLOCK_LENGTH && dataStart + i < dataRead; i++) {
-          Assert.assertEquals((byte) (dataStart + i), data[i]);
-        }
-      }
-    }
+  // TODO(binfan): with better netty RPC mocking, verify that async cache request for the target
+  // block is sent to the netty channel
+  private void validatePartialCaching(int index, int readSize) {
+    assertEquals(readSize, mInStreams.get(index).getBytesRead());
   }
 }

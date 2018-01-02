@@ -16,7 +16,6 @@ import alluxio.Configuration;
 import alluxio.PropertyKey;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
 import org.eclipse.jetty.server.Connector;
 import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.Server;
@@ -44,7 +43,7 @@ public abstract class WebServer {
 
   private final Server mServer;
   private final String mServiceName;
-  private InetSocketAddress mAddress;
+  private final InetSocketAddress mAddress;
   private final ServerConnector mServerConnector;
   protected final WebAppContext mWebAppContext;
 
@@ -81,7 +80,7 @@ public abstract class WebServer {
     try {
       mServerConnector.open();
     } catch (IOException e) {
-      Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
 
     System.setProperty("org.apache.jasper.compiler.disablejsr199", "false");
@@ -172,7 +171,7 @@ public abstract class WebServer {
       mServer.start();
       LOG.info("{} started @ {}", mServiceName, mAddress);
     } catch (Exception e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 }

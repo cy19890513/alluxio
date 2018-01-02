@@ -14,12 +14,14 @@ package alluxio.master;
 import alluxio.Process;
 import alluxio.ProcessUtils;
 import alluxio.RuntimeConstants;
-import alluxio.master.journal.Journal;
+import alluxio.master.journal.JournalSystem;
+import alluxio.master.journal.JournalUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.net.URI;
 import java.util.concurrent.CountDownLatch;
 
 import javax.annotation.concurrent.NotThreadSafe;
@@ -31,18 +33,26 @@ import javax.annotation.concurrent.NotThreadSafe;
 public final class AlluxioSecondaryMaster implements Process {
   private static final Logger LOG = LoggerFactory.getLogger(AlluxioSecondaryMaster.class);
   private final MasterRegistry mRegistry;
+  private final JournalSystem mJournalSystem;
   private final CountDownLatch mLatch;
+  private final SafeModeManager mSafeModeManager;
 
   /**
    * Creates a {@link AlluxioSecondaryMaster}.
    */
   AlluxioSecondaryMaster() {
     try {
-      // Check that journals of each service have been formatted.
-      MasterUtils.checkJournalFormatted();
+      URI journalLocation = JournalUtils.getJournalLocation();
+      mJournalSystem = new JournalSystem.Builder().setLocation(journalLocation).build();
       mRegistry = new MasterRegistry();
+      mSafeModeManager = new DefaultSafeModeManager();
       // Create masters.
-      MasterUtils.createMasters(new Journal.Factory(MasterUtils.getJournalLocation()), mRegistry);
+      MasterUtils.createMasters(mJournalSystem, mRegistry, mSafeModeManager);
+      // Check that journals of each service have been formatted.
+      if (!mJournalSystem.isFormatted()) {
+        throw new RuntimeException(
+            String.format("Journal %s has not been formatted!", journalLocation));
+      }
       mLatch = new CountDownLatch(1);
     } catch (IOException e) {
       throw new RuntimeException(e);

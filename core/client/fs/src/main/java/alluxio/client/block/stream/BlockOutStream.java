@@ -11,22 +11,19 @@
 
 package alluxio.client.block.stream;
 
-import alluxio.Configuration;
-import alluxio.PropertyKey;
 import alluxio.client.BoundedStream;
 import alluxio.client.Cancelable;
 import alluxio.client.file.FileSystemContext;
 import alluxio.client.file.options.OutStreamOptions;
 import alluxio.exception.PreconditionMessage;
-import alluxio.proto.dataserver.Protocol;
-import alluxio.util.CommonUtils;
-import alluxio.util.network.NettyUtils;
 import alluxio.wire.WorkerNetAddress;
 
 import com.google.common.base.Preconditions;
 import com.google.common.io.Closer;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -41,9 +38,12 @@ import javax.annotation.concurrent.NotThreadSafe;
  */
 @NotThreadSafe
 public class BlockOutStream extends OutputStream implements BoundedStream, Cancelable {
+  private static final Logger LOG = LoggerFactory.getLogger(BlockOutStream.class);
+
   private final Closer mCloser;
   /** Length of the stream. If unknown, set to Long.MAX_VALUE. */
   private final long mLength;
+  private final WorkerNetAddress mAddress;
   private ByteBuf mCurrentPacket = null;
 
   private final List<PacketWriter> mPacketWriters;
@@ -61,54 +61,9 @@ public class BlockOutStream extends OutputStream implements BoundedStream, Cance
    */
   public static BlockOutStream create(FileSystemContext context, long blockId, long blockSize,
       WorkerNetAddress address, OutStreamOptions options) throws IOException {
-    if (CommonUtils.isLocalHost(address) && Configuration
-        .getBoolean(PropertyKey.USER_SHORT_CIRCUIT_ENABLED) && !NettyUtils
-        .isDomainSocketSupported(address)) {
-      return createLocalBlockOutStream(context, address, blockId, blockSize, options);
-    } else {
-      Protocol.WriteRequest writeRequestPartial =
-          Protocol.WriteRequest.newBuilder().setId(blockId).setTier(options.getWriteTier())
-              .setType(Protocol.RequestType.ALLUXIO_BLOCK).buildPartial();
-      return createNettyBlockOutStream(context, address, blockSize, writeRequestPartial, options);
-    }
-  }
-
-  /**
-   * Creates a {@link BlockOutStream} that writes to a local file.
-   *
-   * @param context the file system context
-   * @param address the worker network address
-   * @param id the ID
-   * @param length the block or file length
-   * @param options the out stream options
-   * @return the {@link BlockOutStream} created
-   */
-  protected static BlockOutStream createLocalBlockOutStream(FileSystemContext context,
-      WorkerNetAddress address, long id, long length, OutStreamOptions options) throws IOException {
-    long packetSize = Configuration.getBytes(PropertyKey.USER_LOCAL_WRITER_PACKET_SIZE_BYTES);
     PacketWriter packetWriter =
-        LocalFilePacketWriter.create(context, address, id, packetSize, options);
-    return new BlockOutStream(packetWriter, length);
-  }
-
-  /**
-   * Creates a {@link BlockOutStream} that writes to a netty data server.
-   *
-   * @param context the file system context
-   * @param address the netty data server address
-   * @param length the block or file length
-   * @param partialRequest details of the write request which are constant for all requests
-   * @param options the out stream options
-   * @return the {@link BlockOutStream} created
-   */
-  protected static BlockOutStream createNettyBlockOutStream(FileSystemContext context,
-      WorkerNetAddress address, long length, Protocol.WriteRequest partialRequest,
-      OutStreamOptions options) throws IOException {
-    long packetSize =
-        Configuration.getBytes(PropertyKey.USER_NETWORK_NETTY_WRITER_PACKET_SIZE_BYTES);
-    PacketWriter packetWriter =
-        new NettyPacketWriter(context, address, length, partialRequest, packetSize);
-    return new BlockOutStream(packetWriter, length);
+        PacketWriter.Factory.create(context, blockId, blockSize, address, options);
+    return new BlockOutStream(packetWriter, blockSize, address);
   }
 
   /**
@@ -116,10 +71,12 @@ public class BlockOutStream extends OutputStream implements BoundedStream, Cance
    *
    * @param packetWriter the packet writer
    * @param length the length of the stream
+   * @param address the Alluxio worker address
    */
-  protected BlockOutStream(PacketWriter packetWriter, long length) {
+  protected BlockOutStream(PacketWriter packetWriter, long length, WorkerNetAddress address) {
     mCloser = Closer.create();
     mLength = length;
+    mAddress = address;
     mPacketWriters = new ArrayList<>(1);
     mPacketWriters.add(packetWriter);
     mCloser.register(packetWriter);
@@ -203,14 +160,24 @@ public class BlockOutStream extends OutputStream implements BoundedStream, Cance
 
   @Override
   public void close() throws IOException {
+    if (mClosed) {
+      return;
+    }
     try {
       updateCurrentPacket(true);
     } catch (Throwable t) {
-      mCloser.rethrow(t);
+      throw mCloser.rethrow(t);
     } finally {
       mClosed = true;
       mCloser.close();
     }
+  }
+
+  /**
+   * @return the worker address for this stream
+   */
+  public WorkerNetAddress getAddress() {
+    return mAddress;
   }
 
   /**
@@ -246,8 +213,8 @@ public class BlockOutStream extends OutputStream implements BoundedStream, Cance
         // writer. So we need to release here. If the packet has no bytes to read, then it has
         // to be the last packet. It needs to be released as well.
         mCurrentPacket.release();
+        mCurrentPacket = null;
       }
-      mCurrentPacket = null;
     }
     if (!lastPacket) {
       mCurrentPacket = allocateBuffer();

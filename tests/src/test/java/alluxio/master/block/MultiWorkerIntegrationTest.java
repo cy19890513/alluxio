@@ -14,10 +14,10 @@ package alluxio.master.block;
 import static org.junit.Assert.assertEquals;
 
 import alluxio.AlluxioURI;
+import alluxio.BaseIntegrationTest;
 import alluxio.Constants;
 import alluxio.LocalAlluxioClusterResource;
 import alluxio.PropertyKey;
-import alluxio.BaseIntegrationTest;
 import alluxio.client.WriteType;
 import alluxio.client.file.FileInStream;
 import alluxio.client.file.FileSystem;
@@ -57,7 +57,7 @@ public final class MultiWorkerIntegrationTest extends BaseIntegrationTest {
         CreateFileOptions.defaults().setWriteType(WriteType.MUST_CACHE)
             .setLocationPolicy(new RoundRobinPolicy()));
     URIStatus status = fs.getStatus(file);
-    assertEquals(100, status.getInMemoryPercentage());
+    assertEquals(100, status.getInAlluxioPercentage());
     try (FileInStream inStream = fs.openFile(file)) {
       assertEquals(fileSize, IOUtils.toByteArray(inStream).length);
     }

@@ -11,16 +11,33 @@
 
 package alluxio.underfs;
 
+import alluxio.Configuration;
+import alluxio.PropertyKey;
+import alluxio.RuntimeConstants;
+import alluxio.extensions.ExtensionsClassLoader;
+import alluxio.util.ExtensionUtils;
+
 import com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
+import java.io.IOException;
+import java.net.URL;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.ServiceLoader;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
@@ -69,6 +86,9 @@ import javax.annotation.concurrent.NotThreadSafe;
 public final class UnderFileSystemFactoryRegistry {
   private static final Logger LOG = LoggerFactory.getLogger(UnderFileSystemFactoryRegistry.class);
 
+  // Key: absolute path to jar file
+  private static final Set<String> LOADED_LIB_JARS = new HashSet<>();
+  private static final Set<String> LOADED_EXTENSION_JARS = new HashSet<>();
   private static final List<UnderFileSystemFactory> FACTORIES = new CopyOnWriteArrayList<>();
 
   private static boolean sInit = false;
@@ -96,11 +116,28 @@ public final class UnderFileSystemFactoryRegistry {
    * @param path path
    * @return factory if available, null otherwise
    */
+  @Nullable
   public static UnderFileSystemFactory find(String path) {
+    return find(path, null);
+  }
+
+  /**
+   * Finds the first Under File System factory that supports the given path.
+   *
+   * @param path path
+   * @param ufsConf optional configuration object for the UFS, may be null
+   * @return factory if available, null otherwise
+   */
+  @Nullable
+  public static UnderFileSystemFactory find(
+      String path, @Nullable UnderFileSystemConfiguration ufsConf) {
     Preconditions.checkArgument(path != null, "path may not be null");
 
+    scanLibs();
+    scanExtensions();
+
     for (UnderFileSystemFactory factory : FACTORIES) {
-      if (factory.supportsPath(path)) {
+      if (factory.supportsPath(path, ufsConf)) {
         LOG.debug("Selected Under File System Factory implementation {} for path {}",
             factory.getClass(), path);
         return factory;
@@ -116,14 +153,19 @@ public final class UnderFileSystemFactoryRegistry {
    * Finds all the Under File System factories that support the given path.
    *
    * @param path path
+   * @param ufsConf configuration of the UFS
    * @return list of factories that support the given path which may be an empty list
    */
-  public static List<UnderFileSystemFactory> findAll(String path) {
+  public static List<UnderFileSystemFactory> findAll(
+      String path, UnderFileSystemConfiguration ufsConf) {
     Preconditions.checkArgument(path != null, "path may not be null");
+
+    scanLibs();
+    scanExtensions();
 
     List<UnderFileSystemFactory> eligibleFactories = new ArrayList<>();
     for (UnderFileSystemFactory factory : FACTORIES) {
-      if (factory.supportsPath(path)) {
+      if (factory.supportsPath(path, ufsConf)) {
         LOG.debug("Under File System Factory implementation {} is eligible for path {}",
             factory.getClass(), path);
         eligibleFactories.add(factory);
@@ -134,6 +176,63 @@ public final class UnderFileSystemFactoryRegistry {
       LOG.warn("No Under File System Factory implementation supports the path {}", path);
     }
     return eligibleFactories;
+  }
+
+  /**
+   * Finds all {@link UnderFileSystemFactory} from the extensions directory and caches.
+   */
+  private static void scanExtensions() {
+    LOG.info("Loading extension UFS jars from {}", Configuration.get(PropertyKey.EXTENSIONS_DIR));
+    scan(Arrays.asList(ExtensionUtils.listExtensions()), LOADED_EXTENSION_JARS);
+  }
+
+  /**
+   * Finds all {@link UnderFileSystemFactory} from the lib directory and caches.
+   */
+  private static void scanLibs() {
+    LOG.info("Loading core UFS jars from {}", RuntimeConstants.LIB_DIR);
+    List<File> files = new ArrayList<>();
+    try (DirectoryStream<Path> stream = Files.newDirectoryStream(
+        Paths.get(RuntimeConstants.LIB_DIR), "alluxio-underfs-*.jar")) {
+      for (Path entry : stream) {
+        if (entry.toFile().isFile()) {
+          files.add(entry.toFile());
+        }
+      }
+    } catch (IOException e) {
+      LOG.warn("Failed to load UFS libs: {}", e.getMessage());
+    }
+    scan(files, LOADED_LIB_JARS);
+  }
+
+  /**
+   * Class-loads jar files that have not been loaded.
+   *
+   * @param files jar files to class-load
+   * @param loadedJars jars already loaded under this dir
+   */
+  private static void scan(List<File> files, Set<String> loadedJars) {
+    for (File jar : files) {
+      try {
+        URL extensionURL = jar.toURI().toURL();
+        String jarPath = extensionURL.toString();
+        if (!loadedJars.contains(jarPath)) {
+          ClassLoader extensionsClassLoader = new ExtensionsClassLoader(new URL[] {extensionURL},
+              ClassLoader.getSystemClassLoader());
+          ServiceLoader<UnderFileSystemFactory> extensionServiceLoader =
+              ServiceLoader.load(UnderFileSystemFactory.class, extensionsClassLoader);
+          for (UnderFileSystemFactory factory : extensionServiceLoader) {
+            LOG.debug("Discovered an Under File System Factory implementation {} - {} in jar {}",
+                factory.getClass(), factory.toString(), jarPath);
+            // Cache
+            register(factory);
+            loadedJars.add(jarPath);
+          }
+        }
+      } catch (Throwable t) {
+        LOG.warn("Failed to load jar {}: {}", jar, t.getMessage());
+      }
+    }
   }
 
   private static synchronized void init() {
@@ -148,8 +247,11 @@ public final class UnderFileSystemFactoryRegistry {
     for (UnderFileSystemFactory factory : discoveredFactories) {
       LOG.debug("Discovered Under File System Factory implementation {} - {}", factory.getClass(),
           factory.toString());
-      FACTORIES.add(factory);
+      register(factory);
     }
+
+    scanLibs();
+    scanExtensions();
 
     sInit = true;
   }
@@ -190,6 +292,8 @@ public final class UnderFileSystemFactoryRegistry {
       // Reset state
       sInit = false;
       FACTORIES.clear();
+      LOADED_LIB_JARS.clear();
+      LOADED_EXTENSION_JARS.clear();
     }
 
     // Reinitialise

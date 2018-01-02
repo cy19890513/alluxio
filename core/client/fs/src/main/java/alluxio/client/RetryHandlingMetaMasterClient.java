@@ -13,27 +13,24 @@ package alluxio.client;
 
 import alluxio.AbstractMasterClient;
 import alluxio.Constants;
+import alluxio.master.MasterClientConfig;
 import alluxio.thrift.AlluxioService;
 import alluxio.thrift.GetMasterInfoTOptions;
 import alluxio.thrift.MetaMasterClientService;
 import alluxio.wire.MasterInfo;
 import alluxio.wire.MasterInfo.MasterInfoField;
 
-import org.apache.thrift.TException;
-
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.util.HashSet;
 import java.util.Set;
 
 import javax.annotation.concurrent.ThreadSafe;
-import javax.security.auth.Subject;
 
 /**
  * A wrapper for the thrift client to interact with the meta master.
  *
- * Since thrift clients are not thread safe, this class is a wrapper to provide thread safety, and
- * to provide retries.
+ * Since thrift clients are not thread safe, this class is a wrapper to provide thread safety and
+ * support for retries.
  */
 @ThreadSafe
 public final class RetryHandlingMetaMasterClient extends AbstractMasterClient
@@ -41,13 +38,13 @@ public final class RetryHandlingMetaMasterClient extends AbstractMasterClient
   private MetaMasterClientService.Client mClient;
 
   /**
-   * Creates a new block master client.
+   * Creates a new meta master client.
    *
-   * @param subject the parent subject, set to null if not present
-   * @param masterAddress the master address
+   * @param conf master client configuration
    */
-  public RetryHandlingMetaMasterClient(Subject subject, InetSocketAddress masterAddress) {
-    super(subject, masterAddress);
+  public RetryHandlingMetaMasterClient(MasterClientConfig conf) {
+    super(conf);
+    mClient = null;
   }
 
   @Override
@@ -72,20 +69,17 @@ public final class RetryHandlingMetaMasterClient extends AbstractMasterClient
 
   @Override
   public synchronized MasterInfo getInfo(final Set<MasterInfoField> fields) throws IOException {
-    return retryRPC(new RpcCallable<MasterInfo>() {
-      @Override
-      public MasterInfo call() throws TException {
-        Set<alluxio.thrift.MasterInfoField> thriftFields = new HashSet<>();
-        if (fields == null) {
-          thriftFields = null;
-        } else {
-          for (MasterInfoField field : fields) {
-            thriftFields.add(field.toThrift());
-          }
+    return retryRPC(() -> {
+      Set<alluxio.thrift.MasterInfoField> thriftFields = new HashSet<>();
+      if (fields == null) {
+        thriftFields = null;
+      } else {
+        for (MasterInfoField field : fields) {
+          thriftFields.add(field.toThrift());
         }
-        return MasterInfo.fromThrift(
-            mClient.getMasterInfo(new GetMasterInfoTOptions(thriftFields)).getMasterInfo());
       }
+      return MasterInfo.fromThrift(
+          mClient.getMasterInfo(new GetMasterInfoTOptions(thriftFields)).getMasterInfo());
     });
   }
 }

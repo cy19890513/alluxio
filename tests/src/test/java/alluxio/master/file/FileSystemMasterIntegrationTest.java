@@ -12,10 +12,12 @@
 package alluxio.master.file;
 
 import alluxio.AlluxioURI;
+import alluxio.AuthenticatedUserRule;
+import alluxio.BaseIntegrationTest;
+import alluxio.Configuration;
 import alluxio.Constants;
 import alluxio.LocalAlluxioClusterResource;
 import alluxio.PropertyKey;
-import alluxio.BaseIntegrationTest;
 import alluxio.exception.DirectoryNotEmptyException;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.FileAlreadyCompletedException;
@@ -39,10 +41,11 @@ import alluxio.master.file.options.RenameOptions;
 import alluxio.security.authentication.AuthenticatedClientUser;
 import alluxio.util.CommonUtils;
 import alluxio.util.IdUtils;
+import alluxio.wire.CommonOptions;
 import alluxio.wire.FileInfo;
+import alluxio.wire.LoadMetadataType;
 import alluxio.wire.TtlAction;
 
-import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.ClassRule;
@@ -52,10 +55,14 @@ import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.junit.rules.Timeout;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
@@ -63,6 +70,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
+
+import javax.annotation.Nullable;
 
 /**
  * Test behavior of {@link FileSystemMaster}.
@@ -104,18 +114,15 @@ public class FileSystemMasterIntegrationTest extends BaseIntegrationTest {
   @Rule
   public ExpectedException mThrown = ExpectedException.none();
 
+  @Rule
+  public AuthenticatedUserRule mAuthenticatedUser = new AuthenticatedUserRule(TEST_USER);
+
   private FileSystemMaster mFsMaster;
 
   @Before
   public final void before() throws Exception {
     mFsMaster = mLocalAlluxioClusterResource.get().getLocalAlluxioMaster().getMasterProcess()
         .getMaster(FileSystemMaster.class);
-    AuthenticatedClientUser.set(TEST_USER);
-  }
-
-  @After
-  public final void after() throws Exception {
-    AuthenticatedClientUser.remove();
   }
 
   /**
@@ -231,6 +238,7 @@ public class FileSystemMasterIntegrationTest extends BaseIntegrationTest {
   /**
    * Tests concurrent rename of files.
    */
+  @Ignore("https://alluxio.atlassian.net/browse/ALLUXIO-2908")
   @Test
   public void concurrentRename() throws Exception {
     ConcurrentCreator concurrentCreator =
@@ -309,6 +317,30 @@ public class FileSystemMasterIntegrationTest extends BaseIntegrationTest {
     Assert.assertFalse(fileInfo.isFolder());
     Assert.assertEquals("", fileInfo.getOwner());
     Assert.assertEquals(0644, (short) fileInfo.getMode());
+  }
+
+  @Test
+  public void deleteUnsyncedDirectory() throws Exception {
+    mFsMaster.createDirectory(new AlluxioURI("/testFolder"),
+        CreateDirectoryOptions.defaults().setPersisted(true));
+    mFsMaster.createDirectory(new AlluxioURI("/testFolder/child"),
+        CreateDirectoryOptions.defaults().setPersisted(true));
+    String ufs = Configuration.get(PropertyKey.MASTER_MOUNT_TABLE_ROOT_UFS);
+    Files.createDirectory(Paths.get(ufs, "testFolder", "ufsOnlyDir"));
+    try {
+      mFsMaster.delete(new AlluxioURI("/testFolder"),
+          DeleteOptions.defaults().setUnchecked(false).setRecursive(true));
+      Assert.fail("Expected deleting an out of sync directory to fail");
+    } catch (IOException e) {
+      // Expected
+    }
+    // Make sure the root folder still exists in Alluxio space.
+    mFsMaster.listStatus(new AlluxioURI("/testFolder"),
+        ListStatusOptions.defaults().setLoadMetadataType(LoadMetadataType.Never));
+    // The child was in sync, so it should be deleted both from Alluxio and the UFS.
+    mThrown.expect(FileDoesNotExistException.class);
+    mFsMaster.listStatus(new AlluxioURI("/testFolder/child"),
+        ListStatusOptions.defaults().setLoadMetadataType(LoadMetadataType.Always));
   }
 
   @Test
@@ -398,6 +430,22 @@ public class FileSystemMasterIntegrationTest extends BaseIntegrationTest {
   public void deleteEmptyDirectory() throws Exception {
     mFsMaster.createDirectory(new AlluxioURI("/testFolder"), CreateDirectoryOptions.defaults());
     Assert.assertEquals(1, mFsMaster.getFileId(new AlluxioURI("/testFolder")));
+    mFsMaster.delete(new AlluxioURI("/testFolder"), DeleteOptions.defaults()
+        .setRecursive(true));
+    Assert.assertEquals(IdUtils.INVALID_FILE_ID,
+        mFsMaster.getFileId(new AlluxioURI("/testFolder")));
+  }
+
+  @Test
+  public void deleteDirectoryWithPersistedAndNotPersistedSubfolders() throws Exception {
+    mFsMaster.createDirectory(new AlluxioURI("/testFolder"),
+        CreateDirectoryOptions.defaults().setPersisted(true));
+    mFsMaster.createDirectory(new AlluxioURI("/testFolder/persisted"),
+        CreateDirectoryOptions.defaults().setPersisted(true));
+    mFsMaster.createDirectory(new AlluxioURI("/testFolder/inAlluxio1"),
+        CreateDirectoryOptions.defaults().setPersisted(false));
+    mFsMaster.createDirectory(new AlluxioURI("/testFolder/inAlluxio1/inAlluxio2"),
+        CreateDirectoryOptions.defaults().setPersisted(false));
     mFsMaster.delete(new AlluxioURI("/testFolder"), DeleteOptions.defaults()
         .setRecursive(true));
     Assert.assertEquals(IdUtils.INVALID_FILE_ID,
@@ -670,6 +718,53 @@ public class FileSystemMasterIntegrationTest extends BaseIntegrationTest {
     }
   }
 
+  @Test
+  public void syncReplay() throws Exception {
+    AlluxioURI root = new AlluxioURI("/");
+    AlluxioURI alluxioFile = new AlluxioURI("/in_alluxio");
+
+    // Create a persisted Alluxio file (but no ufs file).
+    mFsMaster.createFile(alluxioFile, CreateFileOptions.defaults().setPersisted(true));
+    mFsMaster.completeFile(alluxioFile,
+        CompleteFileOptions.defaults().setOperationTimeMs(TEST_TIME_MS).setUfsLength(0));
+
+    // List what is in Alluxio, without syncing.
+    List<FileInfo> files = mFsMaster.listStatus(root,
+        ListStatusOptions.defaults().setLoadMetadataType(LoadMetadataType.Never)
+            .setCommonOptions(CommonOptions.defaults().setSyncIntervalMs(-1)));
+    Assert.assertEquals(1, files.size());
+    Assert.assertEquals(alluxioFile.getName(), files.get(0).getName());
+
+    // Add ufs only paths
+    String ufs = Configuration.get(PropertyKey.MASTER_MOUNT_TABLE_ROOT_UFS);
+    Files.createDirectory(Paths.get(ufs, "ufs_dir"));
+    Files.createFile(Paths.get(ufs, "ufs_file"));
+
+    // List with syncing, which will remove alluxio only path, and add ufs only paths.
+    files = mFsMaster.listStatus(root,
+        ListStatusOptions.defaults().setLoadMetadataType(LoadMetadataType.Never)
+            .setCommonOptions(CommonOptions.defaults().setSyncIntervalMs(0)));
+    Assert.assertEquals(2, files.size());
+    Set<String> filenames = files.stream().map(FileInfo::getName).collect(Collectors.toSet());
+    Assert.assertTrue(filenames.contains("ufs_dir"));
+    Assert.assertTrue(filenames.contains("ufs_file"));
+
+    // Stop Alluxio.
+    mLocalAlluxioClusterResource.get().stopFS();
+    // Create the master using the existing journal.
+    MasterRegistry registry = createFileSystemMasterFromJournal();
+    FileSystemMaster fsMaster = registry.get(FileSystemMaster.class);
+
+    // List what is in Alluxio, without syncing. Should match the last state.
+    files = fsMaster.listStatus(root,
+        ListStatusOptions.defaults().setLoadMetadataType(LoadMetadataType.Never)
+            .setCommonOptions(CommonOptions.defaults().setSyncIntervalMs(-1)));
+    Assert.assertEquals(2, files.size());
+    filenames = files.stream().map(FileInfo::getName).collect(Collectors.toSet());
+    Assert.assertTrue(filenames.contains("ufs_dir"));
+    Assert.assertTrue(filenames.contains("ufs_file"));
+  }
+
   // TODO(gene): Journal format has changed, maybe add Version to the format and add this test back
   // or remove this test when we have better tests against journal checkpoint.
   // @Test
@@ -761,6 +856,7 @@ public class FileSystemMasterIntegrationTest extends BaseIntegrationTest {
      * @return null
      */
     @Override
+    @Nullable
     public Void call() throws Exception {
       AuthenticatedClientUser.set(TEST_USER);
       exec(mDepth, mConcurrencyDepth, mInitPath);
@@ -839,6 +935,7 @@ public class FileSystemMasterIntegrationTest extends BaseIntegrationTest {
     }
 
     @Override
+    @Nullable
     public Void call() throws Exception {
       AuthenticatedClientUser.set(TEST_USER);
       exec(mDepth, mConcurrencyDepth, mInitPath);
@@ -912,6 +1009,7 @@ public class FileSystemMasterIntegrationTest extends BaseIntegrationTest {
     }
 
     @Override
+    @Nullable
     public Void call() throws Exception {
       AuthenticatedClientUser.set(TEST_USER);
       exec(mDepth, mConcurrencyDepth, mInitPath);
@@ -992,6 +1090,7 @@ public class FileSystemMasterIntegrationTest extends BaseIntegrationTest {
     }
 
     @Override
+    @Nullable
     public Void call() throws Exception {
       AuthenticatedClientUser.set(TEST_USER);
       exec(mDepth, mConcurrencyDepth, mInitPath);
@@ -1072,6 +1171,7 @@ public class FileSystemMasterIntegrationTest extends BaseIntegrationTest {
     }
 
     @Override
+    @Nullable
     public Void call() throws Exception {
       AuthenticatedClientUser.set(TEST_USER);
       mStartBarrier.await();

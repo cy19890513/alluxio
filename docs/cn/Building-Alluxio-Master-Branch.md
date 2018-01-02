@@ -58,9 +58,38 @@ Maven构建环境将自动获取依赖，编译源码，运行单元测试，并
 
 {% include Building-Alluxio-Master-Branch/STDOUT.md %}
 
-## 多种发行版支持
+## 计算框架支持
+针对不同的计算框架构建Alluxio，可以使用不同的计算配置文件运行Maven构建。 生成的Alluxio客户端位于`{{site.ALLUXIO_CLIENT_JAR_PATH}}`。
 
-要针对不同hadoop发行版构建Alluxio，只需修改`hadoop.version`：
+### Hadoop
+
+你可以运行以下命令以使用Hadoop编译Alluxio。
+
+```bash
+$ mvn install -P<HADOOP_PROFILE> -DskipTests
+```
+
+对于不同的Hadoop发行版，可用的Hadoop配置文件包括`hadoop-1`, `hadoop-2.2`, `hadoop-2.3` ... `hadoop-2.8`。通过查看[这节](#发行版支持)，你可以进一步设置特定的Hadoop发行版来编译。
+
+
+
+### Spark/Flink/Presto和其他框架
+
+你可以运行以下命令编译不同计算框架的Alluxio服务器和客户端Jar包。
+
+```bash
+$ mvn install -DskipTests
+```
+
+## 发行版支持
+
+要针对不同hadoop发行版构建Alluxio，只需修改  
+`hadoop.version`。你可以运行以下命令：
+
+```bash
+$ mvn install -P<HADOOP_PROFILE> -Dhadoop.version=<HADOOP_VERSION> -DskipTests
+```
+其中`<HADOOP_VERSION>`可以根据不同的发行版设置
 
 ### Apache
 

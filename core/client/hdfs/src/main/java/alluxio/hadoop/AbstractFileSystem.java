@@ -29,6 +29,7 @@ import alluxio.exception.ExceptionMessage;
 import alluxio.exception.FileDoesNotExistException;
 import alluxio.exception.InvalidPathException;
 import alluxio.exception.PreconditionMessage;
+import alluxio.exception.status.UnavailableException;
 import alluxio.security.User;
 import alluxio.security.authorization.Mode;
 import alluxio.util.CommonUtils;
@@ -57,6 +58,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.NotThreadSafe;
 import javax.security.auth.Subject;
@@ -140,7 +142,7 @@ abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem {
    * @param permission permissions of the created file/folder
    * @param overwrite overwrite if file exists
    * @param bufferSize the size in bytes of the buffer to be used
-   * @param replication under filesystem replication factor
+   * @param replication under filesystem replication factor, this is ignored
    * @param blockSize block size in bytes
    * @param progress queryable progress
    * @return an {@link FSDataOutputStream} created at the indicated path of a file
@@ -253,6 +255,7 @@ abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem {
     return Configuration.getBytes(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT);
   }
 
+  @Nullable
   @Override
   public BlockLocation[] getFileBlockLocations(FileStatus file, long start, long len)
       throws IOException {
@@ -273,7 +276,7 @@ abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem {
       if (end >= start && offset <= start + len) {
         ArrayList<String> names = new ArrayList<>();
         ArrayList<String> hosts = new ArrayList<>();
-        // add the existing in-memory block locations
+        // add the existing in-Alluxio block locations
         for (alluxio.wire.BlockLocation location : fileBlockInfo.getBlockInfo().getLocations()) {
           HostAndPort address = HostAndPort.fromParts(location.getWorkerAddress().getHost(),
               location.getWorkerAddress().getDataPort());
@@ -318,10 +321,14 @@ abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem {
     }
 
     return new FileStatus(fileStatus.getLength(), fileStatus.isFolder(),
-        BLOCK_REPLICATION_CONSTANT, fileStatus.getBlockSizeBytes(),
+        getReplica(fileStatus), fileStatus.getBlockSizeBytes(),
         fileStatus.getLastModificationTimeMs(),
         fileStatus.getCreationTimeMs(), new FsPermission((short) fileStatus.getMode()),
         fileStatus.getOwner(), fileStatus.getGroup(), new Path(mAlluxioHeader + uri));
+  }
+
+  private int getReplica(URIStatus status) {
+    return BLOCK_REPLICATION_CONSTANT;
   }
 
   /**
@@ -412,16 +419,10 @@ abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem {
   @SuppressFBWarnings("ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD")
   @Override
   public void initialize(URI uri, org.apache.hadoop.conf.Configuration conf) throws IOException {
-    // When using zookeeper we get the leader master address from the alluxio.zookeeper.address
-    // configuration property, so the user doesn't need to specify the authority.
-    if (!Configuration.getBoolean(PropertyKey.ZOOKEEPER_ENABLED)) {
-      Preconditions.checkNotNull(uri.getHost(), PreconditionMessage.URI_HOST_NULL);
-      Preconditions.checkNotNull(uri.getPort(), PreconditionMessage.URI_PORT_NULL);
-    }
-
+    Preconditions.checkArgument(uri.getScheme().equals(getScheme()),
+        PreconditionMessage.URI_SCHEME_MISMATCH.toString(), uri.getScheme(), getScheme());
     super.initialize(uri, conf);
     LOG.debug("initialize({}, {}). Connecting to Alluxio", uri, conf);
-    HadoopUtils.addS3Credentials(conf);
     HadoopUtils.addSwiftCredentials(conf);
     setConf(conf);
 
@@ -472,7 +473,11 @@ abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem {
     // We assume here that all clients use the same configuration.
     HadoopConfigurationUtils.mergeHadoopConfiguration(conf);
     Configuration.set(PropertyKey.ZOOKEEPER_ENABLED, isZookeeperMode());
+    // When using zookeeper we get the leader master address from the alluxio.zookeeper.address
+    // configuration property, so the user doesn't need to specify the authority.
     if (!Configuration.getBoolean(PropertyKey.ZOOKEEPER_ENABLED)) {
+      Preconditions.checkNotNull(uri.getHost(), PreconditionMessage.URI_HOST_NULL);
+      Preconditions.checkNotNull(uri.getPort(), PreconditionMessage.URI_PORT_NULL);
       Configuration.set(PropertyKey.MASTER_HOSTNAME, uri.getHost());
       Configuration.set(PropertyKey.MASTER_RPC_PORT, uri.getPort());
     }
@@ -511,7 +516,13 @@ abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem {
    *         system context.
    */
   private boolean checkMasterAddress() {
-    InetSocketAddress masterAddress = FileSystemContext.INSTANCE.getMasterAddress();
+    InetSocketAddress masterAddress = null;
+    try {
+      masterAddress = FileSystemContext.INSTANCE.getMasterAddress();
+    } catch (UnavailableException e) {
+      LOG.warn("Failed to determine master RPC address: {}", e.toString());
+      return false;
+    }
     boolean sameHost = masterAddress.getHostString().equals(mUri.getHost());
     boolean samePort = masterAddress.getPort() == mUri.getPort();
     if (sameHost && samePort) {
@@ -523,6 +534,7 @@ abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem {
   /**
    * @return the hadoop subject if exists, null if not exist
    */
+  @Nullable
   private Subject getHadoopSubject() {
     try {
       UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
@@ -540,12 +552,16 @@ abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem {
   }
 
   /**
+   * @deprecated in 1.6.0, directly infer the value from {@link PropertyKey#ZOOKEEPER_ENABLED}
+   * configuration value.
+   *
    * Determines if zookeeper should be used for the {@link org.apache.hadoop.fs.FileSystem}. This
    * method should only be used for
    * {@link #initialize(java.net.URI, org.apache.hadoop.conf.Configuration)}.
    *
    * @return true if zookeeper should be used
    */
+  @Deprecated
   protected abstract boolean isZookeeperMode();
 
   @Override
@@ -570,7 +586,7 @@ abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem {
     for (int k = 0; k < statuses.size(); k++) {
       URIStatus status = statuses.get(k);
 
-      ret[k] = new FileStatus(status.getLength(), status.isFolder(), BLOCK_REPLICATION_CONSTANT,
+      ret[k] = new FileStatus(status.getLength(), status.isFolder(), getReplica(status),
           status.getBlockSizeBytes(), status.getLastModificationTimeMs(),
           status.getCreationTimeMs(), new FsPermission((short) status.getMode()), status.getOwner(),
           status.getGroup(), new Path(mAlluxioHeader + status.getPath()));

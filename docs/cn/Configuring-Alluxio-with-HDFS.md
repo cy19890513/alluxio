@@ -34,15 +34,15 @@ $ mvn install -Phadoop-2.7 -Dhadoop.version=2.7.1 -DskipTests
 
 ## 配置Alluxio
 
-### Basic Configuration
-
-首先通过template文件创建配置文件。
+你需要通过修改`conf/alluxio-site.properties`来配置Alluxio使用底层存储系统，如果该配置文件不存在，则根据模版创建一个配置文件
 
 ```bash
-cp conf/alluxio-site.properties.template conf/alluxio-site.properties
+$ cp conf/alluxio-site.properties.template conf/alluxio-site.properties
 ```
 
-接着修改`conf/alluxio-site.properties`文件，将底层存储系统的地址设置为HDFS namenode的地址以及你想挂载到Alluxio根目录下的HDFS目录。例如，若你的HDFS namenode是在本地默认端口运行，并且HDFS的根目录已经被映射到Alluxio根目录，则该地址为`hdfs://localhost:9000`；若只有`/alluxio/data`这一个HDFS目录被映射到Alluxio根目录，则该地址为`hdfs://localhost:9000/alluxio/data`。
+### Basic Configuration
+
+修改`conf/alluxio-site.properties`文件，将底层存储系统的地址设置为HDFS namenode的地址以及你想挂载到Alluxio根目录下的HDFS目录。例如，若你的HDFS namenode是在本地默认端口运行，并且HDFS的根目录已经被映射到Alluxio根目录，则该地址为`hdfs://localhost:9000`；若只有`/alluxio/data`这一个HDFS目录被映射到Alluxio根目录，则该地址为`hdfs://localhost:9000/alluxio/data`。
 
 ```
 alluxio.underfs.address=hdfs://NAMENODE:PORT
@@ -92,7 +92,7 @@ $ bin/alluxio-start.sh local
 $ bin/alluxio runTests
 ```
 
-运行成功后，访问HDFS Web UI [http://localhost:50070](http://localhost:50070)，确认其中包含了由Alluxio创建的文件和目录。在该测试中，创建的文件名称应像这样：`/default_tests_files/BasicFile_STORE_SYNC_PERSIST`。
+运行成功后，访问HDFS Web UI [http://localhost:50070](http://localhost:50070)，确认其中包含了由Alluxio创建的文件和目录。在该测试中，创建的文件名称应像这样：`/default_tests_files/BASIC_CACHE_THROUGH`。
 
 运行以下命令停止Alluxio：
 

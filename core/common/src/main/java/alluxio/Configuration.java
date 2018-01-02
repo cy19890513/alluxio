@@ -11,6 +11,7 @@
 
 package alluxio;
 
+import alluxio.PropertyKey.Template;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.PreconditionMessage;
 import alluxio.network.ChannelType;
@@ -20,23 +21,27 @@ import alluxio.util.OSUtils;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
-import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import com.sun.management.OperatingSystemMXBean;
-import io.netty.util.internal.chmv8.ConcurrentHashMapV8;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.management.ManagementFactory;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
@@ -51,28 +56,36 @@ import javax.annotation.concurrent.NotThreadSafe;
  * <li>Java system properties;</li>
  * <li>Environment variables via {@code alluxio-env.sh} or from OS settings;</li>
  * <li>Site specific properties via {@code alluxio-site.properties} file;</li>
- * <li>Default properties via {@code alluxio-default.properties} file.</li>
+ * <li>Default properties defined in the codebase, see {@link PropertyKey};</li>
  * </ol>
  *
  * <p>
- * The default properties are defined in a property file {@code alluxio-default.properties}
- * distributed with Alluxio jar. Alluxio users can override values of these default properties by
- * creating {@code alluxio-site.properties} and putting it under java {@code CLASSPATH} when running
- * Alluxio (e.g., ${ALLUXIO_HOME}/conf/)
+ * The default properties are defined in the {@link PropertyKey} class in the codebase. Alluxio
+ * users can override values of these default properties by creating {@code alluxio-site.properties}
+ * and putting it under java {@code CLASSPATH} when running Alluxio (e.g., ${ALLUXIO_HOME}/conf/)
  */
 @NotThreadSafe
 public final class Configuration {
   private static final Logger LOG = LoggerFactory.getLogger(Configuration.class);
+
+  /** The source of a configuration property. */
+  public enum Source {
+    DEFAULT,
+    HADOOP_CONF,
+    SITE_PROPERTY,
+    SYSTEM_PROPERTY,
+    UNKNOWN,
+  }
 
   /** Regex string to find "${key}" for variable substitution. */
   private static final String REGEX_STRING = "(\\$\\{([^{}]*)\\})";
   /** Regex to find ${key} for variable substitution. */
   private static final Pattern CONF_REGEX = Pattern.compile(REGEX_STRING);
   /** Map of properties. */
-  private static final ConcurrentHashMapV8<String, String> PROPERTIES = new ConcurrentHashMapV8<>();
-
-  /** File to set customized properties for Alluxio server (both master and worker) and client. */
-  public static final String SITE_PROPERTIES = "alluxio-site.properties";
+  private static final ConcurrentHashMap<String, String> PROPERTIES = new ConcurrentHashMap<>();
+  /** Map of property sources. */
+  private static final ConcurrentHashMap<PropertyKey, Source> SOURCES = new ConcurrentHashMap<>();
+  private static String sSitePropertyFile;
 
   static {
     init();
@@ -94,8 +107,8 @@ public final class Configuration {
 
     // Now lets combine, order matters here
     PROPERTIES.clear();
-    merge(defaultProps);
-    merge(systemProps);
+    merge(defaultProps, Source.DEFAULT);
+    merge(systemProps, Source.SYSTEM_PROPERTY);
 
     // Load site specific properties file if not in test mode. Note that we decide whether in test
     // mode by default properties and system properties (via getBoolean). If it is not in test mode
@@ -103,22 +116,20 @@ public final class Configuration {
     if (!getBoolean(PropertyKey.TEST_MODE)) {
       String confPaths = get(PropertyKey.SITE_CONF_DIR);
       String[] confPathList = confPaths.split(",");
-      Properties siteProps = ConfigurationUtils.searchPropertiesFile(SITE_PROPERTIES, confPathList);
-      // Update site properties and system properties in order
-      if (siteProps != null) {
-        merge(siteProps);
-        merge(systemProps);
+      sSitePropertyFile =
+          ConfigurationUtils.searchPropertiesFile(Constants.SITE_PROPERTIES, confPathList);
+      Properties siteProps;
+      if (sSitePropertyFile != null) {
+        siteProps = ConfigurationUtils.loadPropertiesFromFile(sSitePropertyFile);
+        LOG.info("Configuration file {} loaded.", sSitePropertyFile);
+      } else {
+        siteProps = ConfigurationUtils.loadPropertiesFromResource(Constants.SITE_PROPERTIES);
       }
-    }
-
-    // TODO(andrew): get rid of the MASTER_ADDRESS property key
-    if (containsKey(PropertyKey.MASTER_HOSTNAME)) {
-      String masterHostname = get(PropertyKey.MASTER_HOSTNAME);
-      String masterPort = get(PropertyKey.MASTER_RPC_PORT);
-      boolean useZk = Boolean.parseBoolean(get(PropertyKey.ZOOKEEPER_ENABLED));
-      String masterAddress =
-          (useZk ? Constants.HEADER_FT : Constants.HEADER) + masterHostname + ":" + masterPort;
-      set(PropertyKey.MASTER_ADDRESS, masterAddress);
+      if (siteProps != null) {
+        // Update site properties and system properties in order
+        merge(siteProps, Source.SITE_PROPERTY);
+        merge(systemProps, Source.SYSTEM_PROPERTY);
+      }
     }
 
     validate();
@@ -169,25 +180,25 @@ public final class Configuration {
    * configuration wins if it also appears in the current configuration.
    *
    * @param properties The source {@link Properties} to be merged
+   * @param source The source of the the properties (e.g., system property, default and etc)
    */
-  public static void merge(Map<?, ?> properties) {
+  public static void merge(Map<?, ?> properties, Source source) {
     if (properties != null) {
-      // merge the system properties
+      // merge the properties
       for (Map.Entry<?, ?> entry : properties.entrySet()) {
-        String key = entry.getKey().toString();
-        String value = entry.getValue().toString();
+        String key = entry.getKey().toString().trim();
+        String value = entry.getValue().toString().trim();
         if (PropertyKey.isValid(key)) {
-          PROPERTIES.put(key, value);
+          PropertyKey propertyKey = PropertyKey.fromString(key);
+          // Get the true name for the property key in case it is an alias.
+          PROPERTIES.put(propertyKey.getName(), value);
+          SOURCES.put(propertyKey, source);
         }
       }
     }
-    checkUserFileBufferBytes();
   }
 
   // Public accessor methods
-
-  // TODO(binfan): this method should be hidden and only used during initialization and tests.
-
   /**
    * Sets the value for the appropriate key in the {@link Properties}.
    *
@@ -198,7 +209,6 @@ public final class Configuration {
     Preconditions.checkArgument(key != null && value != null,
         String.format("the key value pair (%s, %s) cannot have null", key, value));
     PROPERTIES.put(key.toString(), value.toString());
-    checkUserFileBufferBytes();
   }
 
   /**
@@ -331,7 +341,7 @@ public final class Configuration {
         "Illegal separator for Alluxio properties as list");
     String rawValue = get(key);
 
-    return Lists.newLinkedList(Splitter.on(delimiter).trimResults().omitEmptyStrings()
+    return Lists.newArrayList(Splitter.on(delimiter).trimResults().omitEmptyStrings()
         .split(rawValue));
   }
 
@@ -346,7 +356,12 @@ public final class Configuration {
   public static <T extends Enum<T>> T getEnum(PropertyKey key, Class<T> enumType) {
     String rawValue = get(key);
 
-    return Enum.valueOf(enumType, rawValue);
+    try {
+      return Enum.valueOf(enumType, rawValue);
+    } catch (IllegalArgumentException e) {
+      throw new RuntimeException(ExceptionMessage.UNKNOWN_ENUM.getMessage(rawValue,
+          Arrays.toString(enumType.getEnumConstants())));
+    }
   }
 
   /**
@@ -396,7 +411,7 @@ public final class Configuration {
       return clazz;
     } catch (Exception e) {
       LOG.error("requested class could not be loaded: {}", rawValue, e);
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -472,6 +487,23 @@ public final class Configuration {
   }
 
   /**
+   * @param key the property key
+   * @return the source for the given key
+   */
+  public static Source getSource(PropertyKey key) {
+    Source source = SOURCES.get(key);
+    return (source == null) ? Source.UNKNOWN : source;
+  }
+
+  /**
+   * @return the path of the site property file
+   */
+  @Nullable
+  public static String getSitePropertiesFile() {
+    return sSitePropertyFile;
+  }
+
+  /**
    * Validates worker port configuration.
    *
    * @throws IllegalStateException if invalid worker port configuration is encountered
@@ -490,6 +522,22 @@ public final class Configuration {
       set(PropertyKey.WORKER_DATA_PORT, "0");
       set(PropertyKey.WORKER_RPC_PORT, "0");
       set(PropertyKey.WORKER_WEB_PORT, "0");
+    }
+  }
+
+  /**
+   * Validates timeout related configuration.
+   */
+  private static void checkTimeouts() {
+    long waitTime = getMs(PropertyKey.MASTER_WORKER_CONNECT_WAIT_TIME);
+    long retryInterval = getMs(PropertyKey.USER_RPC_RETRY_MAX_SLEEP_MS);
+    if (waitTime < retryInterval) {
+      LOG.warn("%s=%dms is smaller than %s=%dms. Workers might not have enough time to register. "
+          + "Consider either increasing %s or decreasing %s",
+          PropertyKey.Name.MASTER_WORKER_CONNECT_WAIT_TIME, waitTime,
+          PropertyKey.Name.USER_RPC_RETRY_MAX_SLEEP_MS, retryInterval,
+          PropertyKey.Name.MASTER_WORKER_CONNECT_WAIT_TIME,
+          PropertyKey.Name.USER_RPC_RETRY_MAX_SLEEP_MS);
     }
   }
 
@@ -521,6 +569,34 @@ public final class Configuration {
   }
 
   /**
+   * Checks that tiered locality configuration is consistent.
+   *
+   * @throws IllegalStateException if invalid tiered locality configuration is encountered
+   */
+  private static void checkTieredLocality() {
+    // Check that any custom tiers set by alluxio.locality.{custom_tier}=value are also defined in
+    // the tier ordering defined by alluxio.locality.order.
+    Set<String> tiers = Sets.newHashSet(getList(PropertyKey.LOCALITY_ORDER, ","));
+    Set<String> predefinedKeys =
+        PropertyKey.defaultKeys().stream().map(PropertyKey::getName).collect(Collectors.toSet());
+    for (String key : PROPERTIES.keySet()) {
+      if (predefinedKeys.contains(key)) {
+        // Skip non-templated keys.
+        continue;
+      }
+      Matcher matcher = Template.LOCALITY_TIER.match(key);
+      if (matcher.matches() && matcher.group(1) != null) {
+        String tierName = matcher.group(1);
+        if (!tiers.contains(tierName)) {
+          throw new IllegalStateException(
+              String.format("Tier %s is configured by %s, but does not exist in the tier list %s "
+                  + "configured by %s", tierName, key, tiers, PropertyKey.LOCALITY_ORDER));
+        }
+      }
+    }
+  }
+
+  /**
    * Validates the configuration.
    *
    * @throws IllegalStateException if invalid configuration is encountered
@@ -529,10 +605,19 @@ public final class Configuration {
     for (Map.Entry<String, String> entry : toMap().entrySet()) {
       String propertyName = entry.getKey();
       Preconditions.checkState(PropertyKey.isValid(propertyName), propertyName);
+      PropertyKey propertyKey = PropertyKey.fromString(propertyName);
+      Preconditions.checkState(
+          SOURCES.get(propertyKey) != Source.SITE_PROPERTY || !propertyKey.isIgnoredSiteProperty(),
+          "%s is not accepted in alluxio-site.properties, "
+              + "and must be specified as a JVM property. "
+              + "If no JVM property is present, Alluxio will use default value '%s'.", propertyName,
+          propertyKey.getDefaultValue());
     }
+    checkTimeouts();
     checkWorkerPorts();
     checkUserFileBufferBytes();
     checkZkConfiguration();
+    checkTieredLocality();
   }
 
   private Configuration() {} // prevent instantiation

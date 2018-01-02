@@ -14,11 +14,12 @@ package alluxio.master.keyvalue;
 import alluxio.Configuration;
 import alluxio.Constants;
 import alluxio.PropertyKey;
+import alluxio.master.MasterContext;
 import alluxio.master.MasterFactory;
 import alluxio.master.MasterRegistry;
+import alluxio.master.SafeModeManager;
 import alluxio.master.file.FileSystemMaster;
-import alluxio.master.journal.Journal;
-import alluxio.master.journal.JournalFactory;
+import alluxio.master.journal.JournalSystem;
 
 import com.google.common.base.Preconditions;
 import org.slf4j.Logger;
@@ -49,12 +50,14 @@ public final class KeyValueMasterFactory implements MasterFactory {
   }
 
   @Override
-  public KeyValueMaster create(MasterRegistry registry, JournalFactory journalFactory) {
-    Preconditions.checkArgument(journalFactory != null, "journal factory may not be null");
+  public KeyValueMaster create(MasterRegistry registry, JournalSystem journalSystem,
+      SafeModeManager safeModeManager) {
+    Preconditions.checkNotNull(journalSystem, "journalSystem");
     LOG.info("Creating {} ", KeyValueMaster.class.getName());
-    Journal journal = journalFactory.create(getName());
     FileSystemMaster fileSystemMaster = registry.get(FileSystemMaster.class);
-    KeyValueMaster keyValueMaster = new KeyValueMaster(fileSystemMaster, journal);
+    DefaultKeyValueMaster keyValueMaster =
+        new DefaultKeyValueMaster(fileSystemMaster,
+            new MasterContext(journalSystem, safeModeManager));
     registry.add(KeyValueMaster.class, keyValueMaster);
     return keyValueMaster;
   }

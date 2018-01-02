@@ -15,14 +15,14 @@ import alluxio.Configuration;
 import alluxio.PropertyKey;
 import alluxio.client.block.BlockMasterClient;
 import alluxio.client.block.BlockMasterClientPool;
-import alluxio.client.netty.NettyClient;
+import alluxio.network.netty.NettyClient;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.status.UnavailableException;
+import alluxio.master.MasterInquireClient;
 import alluxio.metrics.MetricsSystem;
-import alluxio.network.connection.NettyChannelPool;
+import alluxio.network.netty.NettyChannelPool;
 import alluxio.resource.CloseableResource;
 import alluxio.util.network.NetworkAddressUtils;
-import alluxio.util.network.NetworkAddressUtils.ServiceType;
 import alluxio.wire.WorkerInfo;
 import alluxio.wire.WorkerNetAddress;
 
@@ -30,7 +30,6 @@ import com.codahale.metrics.Gauge;
 import com.google.common.base.Preconditions;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
-import io.netty.util.internal.chmv8.ConcurrentHashMapV8;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -38,6 +37,7 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
@@ -56,7 +56,7 @@ import javax.security.auth.Subject;
  */
 @ThreadSafe
 public final class FileSystemContext implements Closeable {
-  public static final FileSystemContext INSTANCE = create(null);
+  public static final FileSystemContext INSTANCE = create();
 
   static {
     MetricsSystem.startSinks();
@@ -68,12 +68,12 @@ public final class FileSystemContext implements Closeable {
   private volatile BlockMasterClientPool mBlockMasterClientPool;
 
   // The netty data server channel pools.
-  private final ConcurrentHashMapV8<SocketAddress, NettyChannelPool>
-      mNettyChannelPools = new ConcurrentHashMapV8<>();
+  private final ConcurrentHashMap<SocketAddress, NettyChannelPool>
+      mNettyChannelPools = new ConcurrentHashMap<>();
 
-  /** The shared master address associated with the {@link FileSystemContext}. */
+  /** The shared master inquire client associated with the {@link FileSystemContext}. */
   @GuardedBy("this")
-  private InetSocketAddress mMasterAddress;
+  private MasterInquireClient mMasterInquireClient;
 
   /**
    * Indicates whether the {@link #mLocalWorker} field has been lazily initialized yet.
@@ -91,8 +91,6 @@ public final class FileSystemContext implements Closeable {
   private final Subject mParentSubject;
 
   /**
-   * Creates a new file system context.
-   *
    * @return the context
    */
   public static FileSystemContext create() {
@@ -100,14 +98,23 @@ public final class FileSystemContext implements Closeable {
   }
 
   /**
-   * Creates a file system context with a subject.
-   *
    * @param subject the parent subject, set to null if not present
    * @return the context
    */
   public static FileSystemContext create(Subject subject) {
+    return create(subject, MasterInquireClient.Factory.create());
+  }
+
+  /**
+   * @param subject the parent subject, set to null if not present
+   * @param masterInquireClient the client to use for determining the master; note that if the
+   *        context is reset, this client will be replaced with a new masterInquireClient based on
+   *        global configuration
+   * @return the context
+   */
+  public static FileSystemContext create(Subject subject, MasterInquireClient masterInquireClient) {
     FileSystemContext context = new FileSystemContext(subject);
-    context.init();
+    context.init(masterInquireClient);
     return context;
   }
 
@@ -122,11 +129,14 @@ public final class FileSystemContext implements Closeable {
 
   /**
    * Initializes the context. Only called in the factory methods and reset.
+   *
+   * @param masterInquireClient the client to use for determining the master
    */
-  private void init() {
-    mMasterAddress = NetworkAddressUtils.getConnectAddress(ServiceType.MASTER_RPC);
-    mFileSystemMasterClientPool = new FileSystemMasterClientPool(mParentSubject, mMasterAddress);
-    mBlockMasterClientPool = new BlockMasterClientPool(mParentSubject, mMasterAddress);
+  private synchronized void init(MasterInquireClient masterInquireClient) {
+    mMasterInquireClient = masterInquireClient;
+    mFileSystemMasterClientPool =
+        new FileSystemMasterClientPool(mParentSubject, mMasterInquireClient);
+    mBlockMasterClientPool = new BlockMasterClientPool(mParentSubject, mMasterInquireClient);
   }
 
   /**
@@ -140,6 +150,7 @@ public final class FileSystemContext implements Closeable {
     mFileSystemMasterClientPool = null;
     mBlockMasterClientPool.close();
     mBlockMasterClientPool = null;
+    mMasterInquireClient = null;
 
     for (NettyChannelPool pool : mNettyChannelPools.values()) {
       pool.close();
@@ -147,7 +158,6 @@ public final class FileSystemContext implements Closeable {
     mNettyChannelPools.clear();
 
     synchronized (this) {
-      mMasterAddress = null;
       mLocalWorkerInitialized = false;
       mLocalWorker = null;
     }
@@ -159,7 +169,7 @@ public final class FileSystemContext implements Closeable {
    */
   public synchronized void reset() throws IOException {
     close();
-    init();
+    init(MasterInquireClient.Factory.create());
   }
 
   /**
@@ -171,9 +181,10 @@ public final class FileSystemContext implements Closeable {
 
   /**
    * @return the master address
+   * @throws UnavailableException if the master address cannot be determined
    */
-  public synchronized InetSocketAddress getMasterAddress() {
-    return mMasterAddress;
+  public synchronized InetSocketAddress getMasterAddress() throws UnavailableException {
+    return mMasterInquireClient.getPrimaryRpcAddress();
   }
 
   /**
@@ -239,7 +250,7 @@ public final class FileSystemContext implements Closeable {
       bs.remoteAddress(address);
       NettyChannelPool pool = new NettyChannelPool(bs,
           Configuration.getInt(PropertyKey.USER_NETWORK_NETTY_CHANNEL_POOL_SIZE_MAX),
-          Configuration.getLong(PropertyKey.USER_NETWORK_NETTY_CHANNEL_POOL_GC_THRESHOLD_MS));
+          Configuration.getMs(PropertyKey.USER_NETWORK_NETTY_CHANNEL_POOL_GC_THRESHOLD_MS));
       if (mNettyChannelPools.putIfAbsent(address, pool) != null) {
         // This can happen if this function is called concurrently.
         pool.close();

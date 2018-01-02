@@ -33,6 +33,7 @@ public enum ExceptionMessage {
   PATH_INVALID("Path {0} is invalid"),
 
   // general block
+  BLOCK_UNAVAILABLE("Block {0} is unavailable in both Alluxio and UFS."),
   CANNOT_REQUEST_SPACE("Not enough space left on worker {0} to store blockId {1,number,#}."),
   NO_LOCAL_WORKER("Local address {0} requested but there is no local worker"),
   NO_SPACE_FOR_BLOCK_ON_WORKER("There is no worker with enough space for a new block of size {0}"),
@@ -63,8 +64,6 @@ public enum ExceptionMessage {
   FAILED_SKIP("Failed to skip {0}"),
   INSTREAM_CANNOT_SKIP("The underlying BlockInStream could not skip {0}"),
   READ_CLOSED_STREAM("Cannot read from a closed stream"),
-  SEEK_NEGATIVE("Seek position is negative: {0,number,#}"),
-  SEEK_PAST_EOF("Seek position is past EOF: {0,number,#}, fileSize: {1,number,#}"),
 
   // netty
   BLOCK_WRITE_ERROR(
@@ -90,10 +89,14 @@ public enum ExceptionMessage {
   MOVE_UNCOMMITTED_BLOCK("Cannot move uncommitted blockId {0,number,#}"),
   NO_BLOCK_ID_FOUND("blockId {0,number,#} not found"),
   NO_EVICTION_PLAN_TO_FREE_SPACE("No eviction plan by evictor to free space"),
-  NO_SPACE_FOR_BLOCK_ALLOCATION(
-      "Failed to allocate {0,number,#} bytes after {1} retries for blockId {2,number,#}"),
-  NO_SPACE_FOR_BLOCK_MOVE(
-      "Failed to find space in {0} to move blockId {1,number,#} after {2} retries"),
+  NO_SPACE_FOR_BLOCK_ALLOCATION_TIMEOUT(
+      "Failed to allocate {0,number,#} bytes after {1}ms for blockId {2,number,#}"),
+  NO_SPACE_FOR_BLOCK_ALLOCATION_RETRIES_EXCEEDED(
+      "Failed to allocate {0,number,#} bytes after {1} attempts for blockId {2,number,#}"),
+  NO_SPACE_FOR_BLOCK_MOVE_TIMEOUT(
+      "Failed to find space in {0} to move blockId {1,number,#} after {2}ms"),
+  NO_SPACE_FOR_BLOCK_MOVE_RETRIES_EXCEEDED(
+      "Failed to find space in {0} to move blockId {1,number,#} after {2} attempts"),
   REMOVE_UNCOMMITTED_BLOCK("Cannot remove uncommitted blockId {0,number,#}"),
   TEMP_BLOCK_ID_COMMITTED(
       "Temp blockId {0,number,#} is not available, because it is already committed"),
@@ -153,6 +156,9 @@ public enum ExceptionMessage {
   // block master
   NO_WORKER_FOUND("No worker with workerId {0,number,#} is found"),
 
+  // safe mode
+  MASTER_IN_SAFEMODE("Alluxio master is in safe mode. Please try again later."),
+
   // file system master ufs
   FAILED_UFS_CREATE("Failed to create {0} in the under file system"),
   FAILED_UFS_RENAME("Failed to rename {0} to {1} in the under file system"),
@@ -162,10 +168,20 @@ public enum ExceptionMessage {
       "Worker fileId {0,number,#} is invalid. The worker may have crashed or cleaned up "
           + "the client state due to a timeout."),
 
-  // shell
+  // cli
+  INVALID_ARGS_GENERIC("Invalid args for command {0}"),
+  INVALID_ARGS_NULL("Null args for command {0}"),
+  INVALID_ARGS_NUM("Command {0} takes {1} arguments, not {2}"),
+  INVALID_ARGS_NUM_INSUFFICIENT("Command {0} requires at least {1} arguments ({2} provided)"),
+
+  // extension shell
+  INVALID_EXTENSION_NOT_JAR("File {0} does not have the extension JAR"),
+
+  // fs shell
   DESTINATION_CANNOT_BE_FILE(
       "The destination cannot be an existing file when the source is a directory or a list of "
           + "files."),
+  INVALID_TIME("{0} is not valid time"),
 
   // lineage
   DELETE_LINEAGE_WITH_CHILDREN("The lineage {0} to delete has child lineages"),
@@ -191,6 +207,7 @@ public enum ExceptionMessage {
   KEY_NOT_LONG("Configuration cannot evaluate key {0} as long"),
   KEY_NOT_MS("Configuration cannot evaluate key {0} as milliseconds"),
   UNDEFINED_CONFIGURATION_KEY("No value set for configuration key {0}"),
+  UNKNOWN_ENUM("Unrecognized configuration value <{0}>. Acceptable values: {1}"),
   UNKNOWN_PROPERTY("Unknown property for {0} {1}"),
 
   // security

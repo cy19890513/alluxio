@@ -28,6 +28,7 @@ import alluxio.underfs.options.DeleteOptions;
 import alluxio.underfs.options.FileLocationOptions;
 import alluxio.underfs.options.MkdirsOptions;
 import alluxio.underfs.options.OpenOptions;
+import alluxio.util.UnderFileSystemUtils;
 
 import com.google.common.base.Preconditions;
 import org.apache.commons.lang3.StringUtils;
@@ -54,6 +55,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Stack;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -88,12 +90,17 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
    * @param conf the configuration for this UFS
    * @param hdfsConf the configuration for HDFS
    */
-  HdfsUnderFileSystem(AlluxioURI ufsUri, UnderFileSystemConfiguration conf,
+  public HdfsUnderFileSystem(AlluxioURI ufsUri, UnderFileSystemConfiguration conf,
       Configuration hdfsConf) {
     super(ufsUri, conf);
     mUfsConf = conf;
     Path path = new Path(ufsUri.toString());
+    // UserGroupInformation.setConfiguration(hdfsConf) will trigger service loading.
+    // Stash the classloader to prevent service loading throwing exception due to
+    // classloader mismatch.
+    ClassLoader previousClassLoader = Thread.currentThread().getContextClassLoader();
     try {
+      Thread.currentThread().setContextClassLoader(hdfsConf.getClassLoader());
       // Set Hadoop UGI configuration to ensure UGI can be initialized by the shaded classes for
       // group service.
       UserGroupInformation.setConfiguration(hdfsConf);
@@ -101,6 +108,8 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
     } catch (IOException e) {
       throw new RuntimeException(
           String.format("Failed to get Hadoop FileSystem client for %s", ufsUri), e);
+    } finally {
+      Thread.currentThread().setContextClassLoader(previousClassLoader);
     }
   }
 
@@ -127,7 +136,9 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
 
     // Load HDFS site properties from the given file and overwrite the default HDFS conf,
     // the path of this file can be passed through --option
-    hdfsConf.addResource(new Path(conf.getValue(PropertyKey.UNDERFS_HDFS_CONFIGURATION)));
+    for (String path : conf.getValue(PropertyKey.UNDERFS_HDFS_CONFIGURATION).split(":")) {
+      hdfsConf.addResource(new Path(path));
+    }
 
     // On Hadoop 2.x this is strictly unnecessary since it uses ServiceLoader to automatically
     // discover available file system implementations. However this configuration setting is
@@ -143,18 +154,6 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
     hdfsConf.set("fs.hdfs.impl.disable.cache",
         System.getProperty("fs.hdfs.impl.disable.cache", "true"));
 
-    // NOTE, adding S3 credentials in system properties to HDFS conf for backward compatibility.
-    // TODO(binfan): remove this as it can be set in mount options through --option
-    String accessKeyConf = PropertyKey.S3N_ACCESS_KEY.toString();
-    if (System.getProperty(accessKeyConf) != null
-        && !conf.containsKey(PropertyKey.S3N_ACCESS_KEY)) {
-      hdfsConf.set(accessKeyConf, System.getProperty(accessKeyConf));
-    }
-    String secretKeyConf = PropertyKey.S3N_SECRET_KEY.toString();
-    if (System.getProperty(secretKeyConf) != null
-        && !conf.containsKey(PropertyKey.S3N_SECRET_KEY)) {
-      hdfsConf.set(secretKeyConf, System.getProperty(secretKeyConf));
-    }
     // Set all parameters passed through --option
     for (Map.Entry<String, String> entry : conf.getUserSpecifiedConf().entrySet()) {
       hdfsConf.set(entry.getKey(), entry.getValue());
@@ -230,6 +229,7 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
   }
 
   @Override
+  @Nullable
   public List<String> getFileLocations(String path, FileLocationOptions options)
       throws IOException {
     // If the user has hinted the underlying storage nodes are not co-located with Alluxio
@@ -239,9 +239,15 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
     }
     List<String> ret = new ArrayList<>();
     try {
-      FileStatus fStatus = mFileSystem.getFileStatus(new Path(path));
+      // The only usage of fileStatus is to get the path in getFileBlockLocations.
+      // In HDFS 2, there is an API getFileBlockLocation(Path path, long offset, long len),
+      // but in HDFS 1, the only API is
+      // getFileBlockLocation(FileStatus stat, long offset, long len).
+      // By constructing the file status manually, we can save one RPC call to getFileStatus.
+      FileStatus fileStatus = new FileStatus(0L, false, 0, 0L,
+          0L, 0L, null, null, null, new Path(path));
       BlockLocation[] bLocations =
-          mFileSystem.getFileBlockLocations(fStatus, options.getOffset(), 1);
+          mFileSystem.getFileBlockLocations(fileStatus, options.getOffset(), 1);
       if (bLocations.length > 0) {
         String[] names = bLocations[0].getHosts();
         Collections.addAll(ret, names);
@@ -256,8 +262,10 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
   public UfsFileStatus getFileStatus(String path) throws IOException {
     Path tPath = new Path(path);
     FileStatus fs = mFileSystem.getFileStatus(tPath);
-    return new UfsFileStatus(path, fs.getLen(), fs.getModificationTime(), fs.getOwner(),
-        fs.getGroup(), fs.getPermission().toShort());
+    String contentHash =
+        UnderFileSystemUtils.approximateContentHash(fs.getLen(), fs.getModificationTime());
+    return new UfsFileStatus(path, contentHash, fs.getLen(),
+        fs.getModificationTime(), fs.getOwner(), fs.getGroup(), fs.getPermission().toShort());
   }
 
   @Override
@@ -286,6 +294,21 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
   }
 
   @Override
+  public UfsStatus getStatus(String path) throws IOException {
+    Path tPath = new Path(path);
+    FileStatus fs = mFileSystem.getFileStatus(tPath);
+    if (!fs.isDir()) {
+      // Return file status.
+      String contentHash =
+          UnderFileSystemUtils.approximateContentHash(fs.getLen(), fs.getModificationTime());
+      return new UfsFileStatus(path, contentHash, fs.getLen(), fs.getModificationTime(),
+          fs.getOwner(), fs.getGroup(), fs.getPermission().toShort());
+    }
+    // Return directory status.
+    return new UfsDirectoryStatus(path, fs.getOwner(), fs.getGroup(), fs.getPermission().toShort());
+  }
+
+  @Override
   public boolean isDirectory(String path) throws IOException {
     return mFileSystem.isDirectory(new Path(path));
   }
@@ -296,6 +319,7 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
   }
 
   @Override
+  @Nullable
   public UfsStatus[] listStatus(String path) throws IOException {
     FileStatus[] files = listStatusInternal(path);
     if (files == null) {
@@ -307,7 +331,9 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
       // only return the relative path, to keep consistent with java.io.File.list()
       UfsStatus retStatus;
       if (!status.isDir()) {
-        retStatus = new UfsFileStatus(status.getPath().getName(), status.getLen(),
+        String contentHash = UnderFileSystemUtils
+            .approximateContentHash(status.getLen(), status.getModificationTime());
+        retStatus = new UfsFileStatus(status.getPath().getName(), contentHash, status.getLen(),
             status.getModificationTime(), status.getOwner(), status.getGroup(),
             status.getPermission().toShort());
       } else {
@@ -411,7 +437,7 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
           inputStream.close();
           throw e;
         }
-        return new HdfsUnderFileInputStream(inputStream);
+        return inputStream;
       } catch (IOException e) {
         LOG.warn("{} try to open {} : {}", retryPolicy.getRetryCount(), path, e.getMessage());
         te = e;
@@ -502,6 +528,7 @@ public class HdfsUnderFileSystem extends BaseUnderFileSystem
    * @param path the pathname to list
    * @return {@code null} if the path is not a directory
    */
+  @Nullable
   private FileStatus[] listStatusInternal(String path) throws IOException {
     FileStatus[] files;
     try {

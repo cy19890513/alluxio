@@ -13,6 +13,7 @@ package alluxio.master;
 
 import alluxio.ProcessUtils;
 import alluxio.RuntimeConstants;
+import alluxio.util.CommonUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,7 +39,20 @@ public final class AlluxioMaster {
       System.exit(-1);
     }
 
-    MasterProcess process = MasterProcess.Factory.create();
+    CommonUtils.PROCESS_TYPE.set(CommonUtils.ProcessType.MASTER);
+    MasterProcess process;
+    try {
+      process = MasterProcess.Factory.create();
+    } catch (Throwable t) {
+      LOG.error("Failed to create master process", t);
+      // Exit to stop any non-daemon threads.
+      System.exit(-1);
+      throw t;
+    }
+
+    // Register a shutdown hook for master, so that master closes the journal files when it
+    // receives SIGTERM.
+    ProcessUtils.stopProcessOnShutdown(process);
     ProcessUtils.run(process);
   }
 

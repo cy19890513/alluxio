@@ -13,14 +13,12 @@ package alluxio.util.network;
 
 import alluxio.AlluxioURI;
 import alluxio.Configuration;
-import alluxio.MasterInquireClient;
 import alluxio.PropertyKey;
-import alluxio.exception.PreconditionMessage;
+import alluxio.util.CommonUtils;
 import alluxio.util.OSUtils;
 import alluxio.wire.WorkerNetAddress;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
 import io.netty.channel.unix.DomainSocketAddress;
 import org.apache.thrift.transport.TServerSocket;
 import org.slf4j.Logger;
@@ -36,11 +34,11 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketAddress;
 import java.net.UnknownHostException;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -271,6 +269,18 @@ public final class NetworkAddressUtils {
   }
 
   /**
+   * Helper method to get the bind hostname for a given service.
+   *
+   * @param service the service name
+   * @return the InetSocketAddress the service will bind to
+   */
+  public static InetSocketAddress getBindAddress(ServiceType service) {
+    int port = getPort(service);
+    assertValidPort(port);
+    return new InetSocketAddress(getBindHost(service), getPort(service));
+  }
+
+  /**
    * Helper method to get the {@link InetSocketAddress} bind address on a given service.
    * <p>
    * Host bind information searching order:
@@ -280,21 +290,16 @@ public final class NetworkAddressUtils {
    * <li>A externally resolvable local hostname for the host this JVM is running on
    * </ol>
    *
-   * @param service the service name used to connect
-   * @return the InetSocketAddress the service will bind to
+   * @param service the service name
+   * @return the bind hostname
    */
-  public static InetSocketAddress getBindAddress(ServiceType service) {
-    int port = getPort(service);
-    assertValidPort(port);
-
-    String host;
+  public static String getBindHost(ServiceType service) {
     if (Configuration.containsKey(service.mBindHostKey) && !Configuration.get(service.mBindHostKey)
         .isEmpty()) {
-      host = Configuration.get(service.mBindHostKey);
+      return Configuration.get(service.mBindHostKey);
     } else {
-      host = getLocalHostName();
+      return getLocalHostName();
     }
-    return new InetSocketAddress(host, port);
   }
 
   /**
@@ -306,6 +311,34 @@ public final class NetworkAddressUtils {
   public static String getClientHostName() {
     if (Configuration.containsKey(PropertyKey.USER_HOSTNAME)) {
       return Configuration.get(PropertyKey.USER_HOSTNAME);
+    }
+    return getLocalHostName();
+  }
+
+  /**
+   * Gets a local node name from configuration if it is available, falling back on localhost lookup.
+   *
+   * @return the local node name
+   */
+  public static String getLocalNodeName() {
+    switch (CommonUtils.PROCESS_TYPE.get()) {
+      case CLIENT:
+        if (Configuration.containsKey(PropertyKey.USER_HOSTNAME)) {
+          return Configuration.get(PropertyKey.USER_HOSTNAME);
+        }
+        break;
+      case MASTER:
+        if (Configuration.containsKey(PropertyKey.MASTER_HOSTNAME)) {
+          return Configuration.get(PropertyKey.MASTER_HOSTNAME);
+        }
+        break;
+      case WORKER:
+        if (Configuration.containsKey(PropertyKey.WORKER_HOSTNAME)) {
+          return Configuration.get(PropertyKey.WORKER_HOSTNAME);
+        }
+        break;
+      default:
+        break;
     }
     return getLocalHostName();
   }
@@ -340,7 +373,7 @@ public final class NetworkAddressUtils {
       sLocalHost = InetAddress.getByName(getLocalIpAddress(timeoutMs)).getCanonicalHostName();
       return sLocalHost;
     } catch (UnknownHostException e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -413,7 +446,7 @@ public final class NetworkAddressUtils {
       sLocalIP = address.getHostAddress();
       return sLocalIP;
     } catch (IOException e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -458,6 +491,7 @@ public final class NetworkAddressUtils {
    *         hostname is embedded, or null if the given path is null or empty.
    * @throws UnknownHostException if the hostname cannot be resolved
    */
+  @Nullable
   public static AlluxioURI replaceHostName(AlluxioURI path) throws UnknownHostException {
     if (path == null) {
       return null;
@@ -482,12 +516,27 @@ public final class NetworkAddressUtils {
    * @return the canonical form of the hostname, or null if it is null or empty
    * @throws UnknownHostException if the given hostname cannot be resolved
    */
+  @Nullable
   public static String resolveHostName(String hostname) throws UnknownHostException {
     if (hostname == null || hostname.isEmpty()) {
       return null;
     }
 
     return InetAddress.getByName(hostname).getCanonicalHostName();
+  }
+
+  /**
+   * Resolves a given hostname IP address.
+   *
+   * @param hostname the input hostname, which could be an alias
+   * @return the hostname IP address
+   * @throws UnknownHostException if the given hostname cannot be resolved
+   */
+  public static String resolveIpAddress(String hostname) throws UnknownHostException {
+    Preconditions.checkNotNull(hostname, "hostname");
+    Preconditions.checkArgument(!hostname.isEmpty(),
+            "Cannot resolve IP address for empty hostname");
+    return InetAddress.getByName(hostname).getHostAddress();
   }
 
   /**
@@ -540,7 +589,7 @@ public final class NetworkAddressUtils {
       field.setAccessible(true);
       return (ServerSocket) field.get(thriftSocket);
     } catch (NoSuchFieldException | IllegalAccessException e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -550,6 +599,7 @@ public final class NetworkAddressUtils {
    * @param address socket address to parse
    * @return InetSocketAddress of the String
    */
+  @Nullable
   public static InetSocketAddress parseInetSocketAddress(String address) throws IOException {
     if (address == null) {
       return null;
@@ -591,55 +641,4 @@ public final class NetworkAddressUtils {
     return address;
   }
 
-  /**
-   * Get the active master address from zookeeper for the fault tolerant Alluxio masters.
-   *
-   * @param zkLeaderPath the Zookeeper path containing the leader master address
-   * @return InetSocketAddress the active master address retrieved from zookeeper
-   */
-  public static InetSocketAddress getLeaderAddressFromZK(String zkLeaderPath) {
-    Preconditions.checkState(Configuration.containsKey(PropertyKey.ZOOKEEPER_ADDRESS),
-        PreconditionMessage.ERR_ZK_ADDRESS_NOT_SET.toString(),
-        PropertyKey.ZOOKEEPER_ADDRESS.toString());
-    Preconditions.checkState(Configuration.containsKey(PropertyKey.ZOOKEEPER_ELECTION_PATH),
-        PropertyKey.ZOOKEEPER_ELECTION_PATH.toString());
-    MasterInquireClient masterInquireClient =
-        MasterInquireClient.getClient(
-        Configuration.get(PropertyKey.ZOOKEEPER_ADDRESS),
-        Configuration.get(PropertyKey.ZOOKEEPER_ELECTION_PATH), zkLeaderPath);
-    try {
-      String temp = masterInquireClient.getLeaderAddress();
-      return NetworkAddressUtils.parseInetSocketAddress(temp);
-    } catch (IOException e) {
-      LOG.error(e.getMessage(), e);
-      throw Throwables.propagate(e);
-    }
-  }
-
-  /**
-   * @return InetSocketAddress the list of all master addresses from zookeeper
-   */
-  public static List<InetSocketAddress> getMasterAddressesFromZK() {
-    Preconditions.checkState(Configuration.containsKey(PropertyKey.ZOOKEEPER_ADDRESS));
-    Preconditions.checkState(Configuration.containsKey(PropertyKey.ZOOKEEPER_ELECTION_PATH));
-    Preconditions.checkState(Configuration.containsKey(PropertyKey.ZOOKEEPER_LEADER_PATH));
-    MasterInquireClient masterInquireClient = MasterInquireClient.getClient(
-        Configuration.get(PropertyKey.ZOOKEEPER_ADDRESS),
-        Configuration.get(PropertyKey.ZOOKEEPER_ELECTION_PATH),
-        Configuration.get(PropertyKey.ZOOKEEPER_LEADER_PATH));
-    List<String> addresses = masterInquireClient.getMasterAddresses();
-    if (addresses == null) {
-      throw new RuntimeException(String.format("Failed to get the master addresses from zookeeper, "
-          + "zookeeper address: %s", Configuration.get(PropertyKey.ZOOKEEPER_ADDRESS)));
-    }
-    List<InetSocketAddress> ret = new ArrayList<>(addresses.size());
-    try {
-      for (String address : addresses) {
-        ret.add(NetworkAddressUtils.parseInetSocketAddress(address));
-      }
-      return ret;
-    } catch (IOException e) {
-      throw Throwables.propagate(e);
-    }
-  }
 }

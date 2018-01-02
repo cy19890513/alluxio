@@ -22,7 +22,7 @@ import alluxio.client.file.FileSystemContext;
 import alluxio.client.file.FileSystemTestUtils;
 import alluxio.client.file.URIStatus;
 import alluxio.exception.AlluxioException;
-import alluxio.exception.ExceptionMessage;
+import alluxio.exception.PreconditionMessage;
 import alluxio.util.io.BufferUtils;
 
 import org.apache.hadoop.fs.Seekable;
@@ -84,20 +84,6 @@ public final class HdfsFileInputStreamIntegrationTest extends BaseIntegrationTes
     mUfsInputStream = new HdfsFileInputStream(FileSystemContext.INSTANCE,
         new AlluxioURI(UFS_ONLY_FILE), null);
     alluxio.Configuration.set(PropertyKey.USER_FILE_READ_TYPE_DEFAULT, defaultReadType);
-  }
-
-  private void createUfsInStreamNoPartialcache(ReadType readType) throws Exception {
-    String defaultReadType = alluxio.Configuration.get(PropertyKey.USER_FILE_READ_TYPE_DEFAULT);
-    String defaultPartialCache =
-        alluxio.Configuration.get(PropertyKey.USER_FILE_CACHE_PARTIALLY_READ_BLOCK);
-    alluxio.Configuration.set(PropertyKey.USER_FILE_READ_TYPE_DEFAULT, readType.name());
-    alluxio.Configuration.set(PropertyKey.USER_FILE_CACHE_PARTIALLY_READ_BLOCK, "false");
-    FileSystemTestUtils.createByteFile(mFileSystem, UFS_ONLY_FILE, WriteType.THROUGH, FILE_LEN);
-    mUfsInputStream = new HdfsFileInputStream(FileSystemContext.INSTANCE,
-        new AlluxioURI(UFS_ONLY_FILE), null);
-    alluxio.Configuration.set(PropertyKey.USER_FILE_READ_TYPE_DEFAULT, defaultReadType);
-    alluxio.Configuration
-        .set(PropertyKey.USER_FILE_CACHE_PARTIALLY_READ_BLOCK, defaultPartialCache);
   }
 
   /**
@@ -371,21 +357,22 @@ public final class HdfsFileInputStreamIntegrationTest extends BaseIntegrationTes
   @Test
   public void seekNegative() throws Exception {
     mThrown.expect(IOException.class);
-    mThrown.expectMessage(ExceptionMessage.SEEK_NEGATIVE.getMessage(-1));
+    mThrown.expectMessage(String.format(PreconditionMessage.ERR_SEEK_NEGATIVE.toString(), -1));
     mInMemInputStream.seek(-1);
   }
 
   @Test
   public void seekPastEof() throws Exception {
     mThrown.expect(IOException.class);
-    mThrown.expectMessage(ExceptionMessage.SEEK_PAST_EOF.getMessage(FILE_LEN + 1, FILE_LEN));
+    mThrown.expectMessage(String.format(PreconditionMessage.ERR_SEEK_PAST_END_OF_FILE.toString(),
+        FILE_LEN + 1));
     mInMemInputStream.seek(FILE_LEN + 1);
   }
 
   @Test
   public void seekNegativeUfs() throws Exception {
     mThrown.expect(IOException.class);
-    mThrown.expectMessage(ExceptionMessage.SEEK_NEGATIVE.getMessage(-1));
+    mThrown.expectMessage(String.format(PreconditionMessage.ERR_SEEK_NEGATIVE.toString(), -1));
     createUfsInStream(ReadType.NO_CACHE);
     mUfsInputStream.seek(-1);
   }
@@ -393,7 +380,8 @@ public final class HdfsFileInputStreamIntegrationTest extends BaseIntegrationTes
   @Test
   public void seekPastEofUfs() throws Exception {
     mThrown.expect(IOException.class);
-    mThrown.expectMessage(ExceptionMessage.SEEK_PAST_EOF.getMessage(FILE_LEN + 1, FILE_LEN));
+    mThrown.expectMessage(String.format(PreconditionMessage.ERR_SEEK_PAST_END_OF_FILE.toString(),
+        FILE_LEN + 1));
     createUfsInStream(ReadType.NO_CACHE);
     mUfsInputStream.seek(FILE_LEN + 1);
   }
@@ -403,15 +391,7 @@ public final class HdfsFileInputStreamIntegrationTest extends BaseIntegrationTes
     createUfsInStream(ReadType.CACHE);
     mUfsInputStream.readFully(0, new byte[FILE_LEN]);
     URIStatus statusUfsOnlyFile = mFileSystem.getStatus(new AlluxioURI(UFS_ONLY_FILE));
-    Assert.assertEquals(100, statusUfsOnlyFile.getInMemoryPercentage());
-  }
-
-  @Test
-  public void positionedReadCacheNoPartialCache() throws Exception {
-    createUfsInStreamNoPartialcache(ReadType.CACHE);
-    mUfsInputStream.readFully(0, new byte[FILE_LEN - 1]);
-    URIStatus statusUfsOnlyFile = mFileSystem.getStatus(new AlluxioURI(UFS_ONLY_FILE));
-    Assert.assertEquals(0, statusUfsOnlyFile.getInMemoryPercentage());
+    Assert.assertEquals(100, statusUfsOnlyFile.getInAlluxioPercentage());
   }
 
   @Test
@@ -419,14 +399,6 @@ public final class HdfsFileInputStreamIntegrationTest extends BaseIntegrationTes
     createUfsInStream(ReadType.NO_CACHE);
     mUfsInputStream.readFully(0, new byte[FILE_LEN]);
     URIStatus statusUfsOnlyFIle = mFileSystem.getStatus(new AlluxioURI(UFS_ONLY_FILE));
-    Assert.assertEquals(0, statusUfsOnlyFIle.getInMemoryPercentage());
-  }
-
-  @Test
-  public void positionedReadNoCacheNoPartialCache() throws Exception {
-    createUfsInStreamNoPartialcache(ReadType.NO_CACHE);
-    mUfsInputStream.readFully(0, new byte[FILE_LEN]);
-    URIStatus statusUfsOnlyFIle = mFileSystem.getStatus(new AlluxioURI(UFS_ONLY_FILE));
-    Assert.assertEquals(0, statusUfsOnlyFIle.getInMemoryPercentage());
+    Assert.assertEquals(0, statusUfsOnlyFIle.getInAlluxioPercentage());
   }
 }

@@ -12,10 +12,11 @@
 package alluxio.client;
 
 import alluxio.AlluxioURI;
+import alluxio.BaseIntegrationTest;
 import alluxio.Constants;
+import alluxio.IntegrationTestUtils;
 import alluxio.LocalAlluxioClusterResource;
 import alluxio.PropertyKey;
-import alluxio.BaseIntegrationTest;
 import alluxio.client.file.FileInStream;
 import alluxio.client.file.FileOutStream;
 import alluxio.client.file.FileSystem;
@@ -94,9 +95,9 @@ public class UnderStorageReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
       if (k == 0) {
-        Assert.assertEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+        Assert.assertEquals(100, mFileSystem.getStatus(uri).getInAlluxioPercentage());
       } else {
-        Assert.assertNotEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+        Assert.assertNotEquals(100, mFileSystem.getStatus(uri).getInAlluxioPercentage());
       }
 
       is = mFileSystem.openFile(uri, mReadCache);
@@ -112,7 +113,7 @@ public class UnderStorageReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals(cnt, k);
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
-      Assert.assertEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+      Assert.assertEquals(100, mFileSystem.getStatus(uri).getInAlluxioPercentage());
 
       is = mFileSystem.openFile(uri, mReadCache);
       ret = new byte[k];
@@ -127,7 +128,7 @@ public class UnderStorageReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals(cnt, k);
       Assert.assertTrue(BufferUtils.equalIncreasingByteArray(k, ret));
       is.close();
-      Assert.assertEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+      Assert.assertEquals(100, mFileSystem.getStatus(uri).getInAlluxioPercentage());
     }
   }
 
@@ -169,10 +170,10 @@ public class UnderStorageReadIntegrationTest extends BaseIntegrationTest {
             is.close();
             Assert.assertEquals(cnt, MAX_LEN);
             Assert.assertTrue(BufferUtils.equalIncreasingByteArray(MAX_LEN, ret));
-            while (mFileSystem.getStatus(uri).getInMemoryPercentage() < 100) {
+            while (mFileSystem.getStatus(uri).getInAlluxioPercentage() < 100) {
               Thread.sleep(1000);
             }
-            Assert.assertEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+            Assert.assertEquals(100, mFileSystem.getStatus(uri).getInAlluxioPercentage());
             count.incrementAndGet();
           } catch (Throwable e) {
             LOG.error("Failed to read file {}.", index, e);
@@ -224,7 +225,7 @@ public class UnderStorageReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals(k / 2, is.skip(k / 2));
       Assert.assertEquals(k / 2, is.read());
       is.close();
-      Assert.assertEquals(100, mFileSystem.getStatus(uri).getInMemoryPercentage());
+      IntegrationTestUtils.waitForFileCached(mFileSystem, uri, 1000);
 
       if (k >= 3) {
         is = mFileSystem.openFile(uri, mReadCache);
@@ -234,7 +235,7 @@ public class UnderStorageReadIntegrationTest extends BaseIntegrationTest {
         Assert.assertEquals(t, is.skip(t));
         Assert.assertEquals(2 * t + 1, is.read());
         is.close();
-        Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+        IntegrationTestUtils.waitForFileCached(mFileSystem, uri, 1000);
       }
     }
   }
@@ -261,6 +262,6 @@ public class UnderStorageReadIntegrationTest extends BaseIntegrationTest {
       Assert.assertEquals((byte) i, is.read());
     }
     is.close();
-    Assert.assertTrue(mFileSystem.getStatus(uri).getInMemoryPercentage() == 100);
+    Assert.assertTrue(mFileSystem.getStatus(uri).getInAlluxioPercentage() == 100);
   }
 }

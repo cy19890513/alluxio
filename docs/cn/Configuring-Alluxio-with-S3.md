@@ -9,23 +9,23 @@ priority: 0
 * 内容列表
 {:toc}
 
-该指南介绍如何配置Alluxio从而使用[Amazon S3](https://aws.amazon.com/s3/)作为底层文件系统。
+该指南介绍配置[Amazon S3](https://aws.amazon.com/s3/)作为Alluxio底层文件系统的指令。
 
 ## 初始步骤
 
 首先，本地要有Alluxio二进制包。你可以自己[编译Alluxio](Building-Alluxio-Master-Branch.html)，或者[下载二进制包](Running-Alluxio-Locally.html)
 
-然后，如果你还没有进行这项配置，那么用`bootstrapConf`命令创建你的配置文件
-
-例如，如果你在本地机器上运行Alluxio，`ALLUXIO_MASTER_HOSTNAME`应该设置为`localhost`。
-
-{% include Configuring-Alluxio-with-S3/bootstrapConf.md %}
-
-或者，你也可以由template文件创建配置文件并手动设置配置内容：
-
-{% include Common-Commands/copy-alluxio-env.md %}
-
 另外，为了在S3上使用Alluxio，需要创建一个bucket（或者使用一个已有的bucket）。还要注意在该bucket里使用的目录，可以在该bucket中新建一个目录，或者使用一个存在的目录。在该向导中，S3 bucket的名称为`S3_BUCKET`，在该bucket里的目录名称为`S3_DIRECTORY`。
+
+## 挂载S3
+
+### 根挂载
+
+要使用底层存储系统，你需要编辑`conf/alluxio-site.properties`来配置Alluxio。如果该文件不存在，那就从模板创建一个配置文件。
+
+```bash
+$ cp conf/alluxio-site.properties.template conf/alluxio-site.properties
+```
 
 ## 配置Alluxio
 
@@ -49,11 +49,11 @@ priority: 0
 
 ### 通过代理访问S3
 
-若要通过代理与S3交互，在`conf/alluxio-env.sh`中的`ALLUXIO_JAVA_OPTS`部分添加：
+若要通过代理与S3交互，修改文件`conf/alluxio-site.properties`以包含：
 
 {% include Configuring-Alluxio-with-S3/proxy.md %}
 
-其中，`<PROXY_HOST>`和`<PROXY_PORT>`为代理的主机名和端口，`<USE_HTTPS?>`根据是否使用https与代理通信设置为`true`或`false`。
+其中，`<PROXY_HOST>`和`<PROXY_PORT>`为代理的主机名和端口。
 
 ## 配置应用依赖
 
@@ -66,13 +66,11 @@ priority: 0
 
 ### 使用非亚马逊服务提供商
 
-如果需要使用一个不是来自"s3.amazonaws.com"的S3服务，用户需要修改`conf/alluxio-env.sh`文件中的`ALLUXIO_JAVA_OPTS`部分，具体添加如下：
+如果需要使用一个不是来自"s3.amazonaws.com"的S3服务，修改文件`conf/alluxio-site.properties`以包含：
 
 {% include Configuring-Alluxio-with-S3/non-amazon.md %}
 
-对于这些参数，将`<S3_ENDPOINT>`参数替换成你的S3服务的主机名。该参数只有在你的服务提供商非`s3.amazonaws.com`时才需要进行配置。
-
-将`<USE_HTTPS>`设置为`true`或者`false`。如果设置为`true` (使用HTTPS)，同时需要设置`<HTTPS_PORT>`为服务提供商给定的HTTPS port，并且删除`alluxio.underfs.s3.endpoint.http.port`参数。 如果你将`<USE_HTTPS>`设置为`false`（即使用HTTP），同时也需要设置`<HTTPS_PORT>`为服务提供商给定的HTTPS port，并且删除`alluxio.underfs.s3.endpoint.https.port`参数。如果HTTP或HTTPS的port值没有设定，那么`<HTTP_PORT>`采用的默认端口为80，`<HTTPS_PORT>`采用的默认端口为443.
+对于这些参数，将`<S3_ENDPOINT>`参数替换成你的S3服务的主机名和端口，例如`http://localhost:9000`。该参数只有在你的服务提供商非`s3.amazonaws.com`时才需要进行配置。
 
 ### 使用v2的S3签名
 

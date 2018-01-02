@@ -11,6 +11,8 @@
 
 package alluxio.util;
 
+import alluxio.Configuration;
+import alluxio.PropertyKey;
 import alluxio.exception.status.AlluxioStatusException;
 import alluxio.exception.status.Status;
 import alluxio.proto.dataserver.Protocol;
@@ -31,7 +33,10 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -57,6 +62,8 @@ public final class CommonUtils {
 
   private static final String ALPHANUM =
       "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  private static final String DATE_FORMAT_PATTERN =
+      Configuration.get(PropertyKey.USER_DATE_FORMAT_PATTERN);
   private static final Random RANDOM = new Random();
 
   /**
@@ -188,21 +195,22 @@ public final class CommonUtils {
    * @param ctorClassArgs parameters type list of the constructor to initiate, if null default
    *        constructor will be called
    * @param ctorArgs the arguments to pass the constructor
-   * @return new class object or null if not successful
-   * @throws InstantiationException if the instantiation fails
-   * @throws IllegalAccessException if the constructor cannot be accessed
-   * @throws NoSuchMethodException if the constructor does not exist
-   * @throws SecurityException if security violation has occurred
-   * @throws InvocationTargetException if the constructor invocation results in an exception
+   * @return new class object
+   * @throws RuntimeException if the class cannot be instantiated
    */
   public static <T> T createNewClassInstance(Class<T> cls, Class<?>[] ctorClassArgs,
-      Object[] ctorArgs) throws InstantiationException, IllegalAccessException,
-      NoSuchMethodException, SecurityException, InvocationTargetException {
-    if (ctorClassArgs == null) {
-      return cls.newInstance();
+      Object[] ctorArgs) {
+    try {
+      if (ctorClassArgs == null) {
+        return cls.newInstance();
+      }
+      Constructor<T> ctor = cls.getConstructor(ctorClassArgs);
+      return ctor.newInstance(ctorArgs);
+    } catch (InvocationTargetException e) {
+      throw new RuntimeException(e.getCause());
+    } catch (ReflectiveOperationException e) {
+      throw new RuntimeException(e);
     }
-    Constructor<T> ctor = cls.getConstructor(ctorClassArgs);
-    return ctor.newInstance(ctorArgs);
   }
 
   /**
@@ -516,6 +524,23 @@ public final class CommonUtils {
     }
   }
 
+  /** Alluxio process types. */
+  public enum ProcessType {
+    CLIENT,
+    MASTER,
+    PROXY,
+    WORKER;
+  }
+
+  /**
+   * Represents the type of Alluxio process running in this JVM.
+   *
+   * NOTE: This will only be set by main methods of Alluxio processes. It will not be set properly
+   * for tests. Avoid using this field if at all possible.
+   */
+  public static final java.util.concurrent.atomic.AtomicReference<ProcessType> PROCESS_TYPE =
+      new java.util.concurrent.atomic.AtomicReference<>(ProcessType.CLIENT);
+
   /**
    * Unwraps a {@link alluxio.proto.dataserver.Protocol.Response}.
    *
@@ -525,6 +550,21 @@ public final class CommonUtils {
     Status status = Status.fromProto(response.getStatus());
     if (status != Status.OK) {
       throw AlluxioStatusException.from(status, response.getMessage());
+    }
+  }
+
+  /**
+   * Unwraps a {@link alluxio.proto.dataserver.Protocol.Response} associated with a channel.
+   *
+   * @param response the response
+   * @param channel the channel that receives this response
+   */
+  public static void unwrapResponseFrom(Protocol.Response response, Channel channel)
+      throws AlluxioStatusException {
+    Status status = Status.fromProto(response.getStatus());
+    if (status != Status.OK) {
+      throw AlluxioStatusException.from(status, String
+          .format("Channel to %s: %s", channel.remoteAddress(), response.getMessage()));
     }
   }
 
@@ -572,6 +612,17 @@ public final class CommonUtils {
       Thread.currentThread().interrupt();
       throw new RuntimeException(e);
     }
+  }
+
+  /**
+   * Converts a millisecond number to a formatted date String.
+   *
+   * @param millis a long millisecond number
+   * @return formatted date String
+   */
+  public static String convertMsToDate(long millis) {
+    DateFormat dateFormat = new SimpleDateFormat(DATE_FORMAT_PATTERN);
+    return dateFormat.format(new Date(millis));
   }
 
   private CommonUtils() {} // prevent instantiation

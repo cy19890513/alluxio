@@ -11,10 +11,17 @@
 
 package alluxio.master;
 
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.spy;
+
 import alluxio.AlluxioURI;
 import alluxio.AuthenticatedUserRule;
 import alluxio.BaseIntegrationTest;
 import alluxio.Configuration;
+import alluxio.ConfigurationRule;
 import alluxio.ConfigurationTestUtils;
 import alluxio.Constants;
 import alluxio.PropertyKey;
@@ -22,24 +29,23 @@ import alluxio.SystemPropertyRule;
 import alluxio.client.WriteType;
 import alluxio.client.file.FileSystem;
 import alluxio.client.file.FileSystemContext;
-import alluxio.master.file.FileSystemMaster;
-import alluxio.master.file.options.ListStatusOptions;
-import alluxio.underfs.UnderFileSystem;
+import alluxio.multi.process.MultiProcessCluster;
+import alluxio.multi.process.MultiProcessCluster.DeployMode;
 import alluxio.underfs.UnderFileSystemConfiguration;
+import alluxio.underfs.UnderFileSystemFactory;
 import alluxio.underfs.UnderFileSystemFactoryRegistry;
 import alluxio.underfs.sleepfs.SleepingUnderFileSystem;
 import alluxio.underfs.sleepfs.SleepingUnderFileSystemFactory;
 import alluxio.underfs.sleepfs.SleepingUnderFileSystemOptions;
 import alluxio.util.CommonUtils;
-import alluxio.util.IdUtils;
 
+import com.google.common.collect.ImmutableMap;
 import org.junit.After;
-import org.junit.Assert;
 import org.junit.Before;
 import org.junit.ClassRule;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
-import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
@@ -48,7 +54,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Test master journal for cluster terminating. Assert that test can replay the log and reproduce
- * the correct state. Test both the single master (alluxio) and multi masters (alluxio-ft).
+ * the correct state. Test both the single master and multi masters.
  */
 public class JournalShutdownIntegrationTest extends BaseIntegrationTest {
   @Rule
@@ -62,6 +68,15 @@ public class JournalShutdownIntegrationTest extends BaseIntegrationTest {
   private ClientThread mCreateFileThread;
   /** Executor for running client threads. */
   private ExecutorService mExecutorsForClient;
+
+  @Rule
+  public ConfigurationRule mConfigurationRule =
+      new ConfigurationRule(new ImmutableMap.Builder<PropertyKey, String>()
+          .put(PropertyKey.MASTER_JOURNAL_TAILER_SHUTDOWN_QUIET_WAIT_TIME_MS, "100")
+          .put(PropertyKey.MASTER_JOURNAL_CHECKPOINT_PERIOD_ENTRIES, "2")
+          .put(PropertyKey.MASTER_JOURNAL_LOG_SIZE_BYTES_MAX, "32")
+          .put(PropertyKey.USER_RPC_RETRY_MAX_SLEEP_MS, "1sec")
+          .build());
 
   @ClassRule
   public static SystemPropertyRule sDisableHdfsCacheRule =
@@ -77,90 +92,114 @@ public class JournalShutdownIntegrationTest extends BaseIntegrationTest {
   @Before
   public final void before() throws Exception {
     mExecutorsForClient = Executors.newFixedThreadPool(1);
-    Configuration.set(PropertyKey.MASTER_JOURNAL_TAILER_SHUTDOWN_QUIET_WAIT_TIME_MS, 100);
-    Configuration.set(PropertyKey.MASTER_JOURNAL_CHECKPOINT_PERIOD_ENTRIES, 2);
-    Configuration.set(PropertyKey.MASTER_JOURNAL_LOG_SIZE_BYTES_MAX, 32);
   }
 
   @Test
   public void singleMasterJournalStopIntegration() throws Exception {
-    LocalAlluxioCluster cluster = setupSingleMasterCluster();
-    runCreateFileThread(cluster.getClient());
-    System.out.println(Configuration.get(PropertyKey.MASTER_JOURNAL_FOLDER));
-    // Shutdown the cluster
-    cluster.stopFS();
-    CommonUtils.sleepMs(TEST_TIME_MS);
-    awaitClientTermination();
-    reproduceAndCheckState(mCreateFileThread.getSuccessNum());
-    // clean up
-    cluster.stopUFS();
+    MultiProcessCluster cluster = MultiProcessCluster.newBuilder()
+        .setClusterName("singleMasterJournalStopIntegration")
+        .setNumWorkers(0)
+        .setNumMasters(1)
+        .build();
+    try {
+      cluster.start();
+      FileSystem fs = cluster.getFileSystemClient();
+      runCreateFileThread(fs);
+      cluster.waitForAndKillPrimaryMaster(10 * Constants.SECOND_MS);
+      awaitClientTermination();
+      cluster.startMaster(0);
+      int actualFiles = fs.listStatus(new AlluxioURI(TEST_FILE_DIR)).size();
+      int successFiles = mCreateFileThread.getSuccessNum();
+      assertTrue(
+          String.format("successFiles: %s, actualFiles: %s", successFiles, actualFiles),
+          (successFiles == actualFiles) || (successFiles + 1 == actualFiles));
+      cluster.notifySuccess();
+    } finally {
+      cluster.destroy();
+    }
   }
 
+  /*
+   * We use the external cluster for this test due to flakiness issues when running in a single JVM.
+   */
   @Test
+  @Ignore
   public void multiMasterJournalStopIntegration() throws Exception {
-    MultiMasterLocalAlluxioCluster cluster = setupMultiMasterCluster();
-    runCreateFileThread(cluster.getClient());
-    // Kill the leader one by one.
-    for (int kills = 0; kills < TEST_NUM_MASTERS; kills++) {
-      cluster.waitForNewMaster(120 * Constants.SECOND_MS);
-      Assert.assertTrue(cluster.stopLeader());
+    MultiProcessCluster cluster = MultiProcessCluster.newBuilder()
+        .setClusterName("multiMasterJournalStopIntegration")
+        .setNumWorkers(0)
+        .setNumMasters(TEST_NUM_MASTERS)
+        .setDeployMode(DeployMode.ZOOKEEPER_HA)
+        // Cannot go lower than 2x the tick time. Curator testing cluster tick time is 3s and cannot
+        // be overridden until later versions of Curator.
+        .addProperty(PropertyKey.ZOOKEEPER_SESSION_TIMEOUT, "6s")
+        .build();
+    try {
+      cluster.start();
+      FileSystem fs = cluster.getFileSystemClient();
+      runCreateFileThread(fs);
+      for (int i = 0; i < TEST_NUM_MASTERS; i++) {
+        cluster.waitForAndKillPrimaryMaster(30 * Constants.SECOND_MS);
+      }
+      awaitClientTermination();
+      cluster.startMaster(0);
+      int actualFiles = fs.listStatus(new AlluxioURI(TEST_FILE_DIR)).size();
+      int successFiles = mCreateFileThread.getSuccessNum();
+      assertTrue(
+          String.format("successFiles: %s, actualFiles: %s", successFiles, actualFiles),
+          (successFiles == actualFiles) || (successFiles + 1 == actualFiles));
+      cluster.notifySuccess();
+    } finally {
+      cluster.destroy();
     }
-    cluster.stopFS();
-    awaitClientTermination();
-    reproduceAndCheckState(mCreateFileThread.getSuccessNum());
-    // clean up
-    cluster.stopUFS();
   }
 
   @Test
   public void singleMasterMountUnmountJournal() throws Exception {
     LocalAlluxioCluster cluster = setupSingleMasterCluster();
-    UnderFileSystem ufs = mountUnmount(cluster.getClient());
+    UnderFileSystemFactory factory = mountUnmount(cluster.getClient());
     // Shutdown the cluster
     cluster.stopFS();
     CommonUtils.sleepMs(TEST_TIME_MS);
     awaitClientTermination();
-    // Reject connection from Alluxio
-    Mockito.doThrow(new IOException()).when(ufs).connectFromMaster(Mockito.anyString());
+    // Fail the creation of UFS
+    doThrow(new RuntimeException()).when(factory).create(anyString(),
+        any(UnderFileSystemConfiguration.class));
     createFsMasterFromJournal();
-    // clean up
-    cluster.stopUFS();
   }
 
   @Test
   public void multiMasterMountUnmountJournal() throws Exception {
     MultiMasterLocalAlluxioCluster cluster = setupMultiMasterCluster();
-    UnderFileSystem ufs = mountUnmount(cluster.getClient());
+    UnderFileSystemFactory factory = mountUnmount(cluster.getClient());
     // Kill the leader one by one.
     for (int kills = 0; kills < TEST_NUM_MASTERS; kills++) {
       cluster.waitForNewMaster(120 * Constants.SECOND_MS);
-      Assert.assertTrue(cluster.stopLeader());
+      assertTrue(cluster.stopLeader());
     }
     // Shutdown the cluster
     cluster.stopFS();
     CommonUtils.sleepMs(TEST_TIME_MS);
     awaitClientTermination();
-    // Reject connection from Alluxio
-    Mockito.doThrow(new IOException()).when(ufs).connectFromMaster(Mockito.anyString());
+    // Fail the creation of UFS
+    doThrow(new RuntimeException()).when(factory).create(anyString(),
+        any(UnderFileSystemConfiguration.class));
     createFsMasterFromJournal();
-    // clean up
-    cluster.stopUFS();
   }
 
   /**
    * @param fs Filesystem client
-   * @return a spied UFS mounted to and then unmounted from fs
+   * @return a spied UFS factory mounted to and then unmounted from fs
    */
-  private UnderFileSystem mountUnmount(FileSystem fs) throws Exception {
-    SleepingUnderFileSystem sleepingUfs = Mockito.spy(
-        new SleepingUnderFileSystem(new AlluxioURI("sleep:///"),
-            new SleepingUnderFileSystemOptions(), UnderFileSystemConfiguration.defaults()));
+  private UnderFileSystemFactory mountUnmount(FileSystem fs) throws Exception {
+    SleepingUnderFileSystem sleepingUfs = new SleepingUnderFileSystem(new AlluxioURI("sleep:///"),
+        new SleepingUnderFileSystemOptions(), UnderFileSystemConfiguration.defaults());
     SleepingUnderFileSystemFactory sleepingUfsFactory =
         new SleepingUnderFileSystemFactory(sleepingUfs);
     UnderFileSystemFactoryRegistry.register(sleepingUfsFactory);
     fs.mount(new AlluxioURI("/mnt"), new AlluxioURI("sleep:///"));
     fs.unmount(new AlluxioURI("/mnt"));
-    return sleepingUfs;
+    return spy(sleepingUfsFactory);
   }
 
   /**
@@ -182,31 +221,11 @@ public class JournalShutdownIntegrationTest extends BaseIntegrationTest {
   }
 
   /**
-   * Reproduce the journal and check if the state is correct.
-   */
-  private void reproduceAndCheckState(int successFiles) throws Exception {
-    Assert.assertNotEquals(successFiles, 0);
-    MasterRegistry registry = createFsMasterFromJournal();
-    FileSystemMaster fsMaster = registry.get(FileSystemMaster.class);
-
-    int actualFiles =
-        fsMaster.listStatus(new AlluxioURI(TEST_FILE_DIR), ListStatusOptions.defaults())
-            .size();
-    Assert.assertTrue((successFiles == actualFiles) || (successFiles + 1 == actualFiles));
-    for (int f = 0; f < successFiles; f++) {
-      Assert.assertTrue(
-          fsMaster.getFileId(new AlluxioURI(TEST_FILE_DIR + f)) != IdUtils.INVALID_FILE_ID);
-    }
-    registry.stop();
-  }
-
-  /**
    * Sets up and starts a multi-master cluster.
    */
   private MultiMasterLocalAlluxioCluster setupMultiMasterCluster() throws Exception {
     // Setup and start the alluxio-ft cluster.
-    MultiMasterLocalAlluxioCluster cluster =
-        new MultiMasterLocalAlluxioCluster(TEST_NUM_MASTERS);
+    MultiMasterLocalAlluxioCluster cluster = new MultiMasterLocalAlluxioCluster(TEST_NUM_MASTERS);
     cluster.initConfiguration();
     cluster.start();
     return cluster;

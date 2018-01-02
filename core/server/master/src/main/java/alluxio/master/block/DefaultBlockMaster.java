@@ -16,7 +16,6 @@ import alluxio.Constants;
 import alluxio.MasterStorageTierAssoc;
 import alluxio.PropertyKey;
 import alluxio.StorageTierAssoc;
-import alluxio.clock.Clock;
 import alluxio.clock.SystemClock;
 import alluxio.collections.ConcurrentHashSet;
 import alluxio.collections.IndexDefinition;
@@ -24,15 +23,16 @@ import alluxio.collections.IndexedSet;
 import alluxio.exception.BlockInfoException;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.NoWorkerException;
+import alluxio.exception.status.UnavailableException;
 import alluxio.heartbeat.HeartbeatContext;
 import alluxio.heartbeat.HeartbeatExecutor;
 import alluxio.heartbeat.HeartbeatThread;
 import alluxio.master.AbstractMaster;
+import alluxio.master.MasterContext;
 import alluxio.master.block.meta.MasterBlockInfo;
 import alluxio.master.block.meta.MasterBlockLocation;
 import alluxio.master.block.meta.MasterWorkerInfo;
 import alluxio.master.journal.JournalContext;
-import alluxio.master.journal.JournalFactory;
 import alluxio.metrics.MetricsSystem;
 import alluxio.proto.journal.Block.BlockContainerIdGeneratorEntry;
 import alluxio.proto.journal.Block.BlockInfoEntry;
@@ -55,12 +55,12 @@ import com.codahale.metrics.Gauge;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterators;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import io.netty.util.internal.chmv8.ConcurrentHashMapV8;
 import org.apache.thrift.TProcessor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -72,13 +72,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
- * This master manages the metadata for all the blocks and block workers in Alluxio.
+ * This block master manages the metadata for all the blocks and block workers in Alluxio.
  */
 @NotThreadSafe // TODO(jiri): make thread-safe (c.f. ALLUXIO-1664)
 public final class DefaultBlockMaster extends AbstractMaster implements BlockMaster {
@@ -129,8 +130,8 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
 
   // Block metadata management.
   /** Blocks on all workers, including active and lost blocks. This state must be journaled. */
-  private final ConcurrentHashMapV8<Long, MasterBlockInfo> mBlocks =
-      new ConcurrentHashMapV8<>(8192, 0.90f, 64);
+  private final ConcurrentHashMap<Long, MasterBlockInfo> mBlocks =
+      new ConcurrentHashMap<>(8192, 0.90f, 64);
   /** Keeps track of blocks which are no longer in Alluxio storage. */
   private final ConcurrentHashSet<Long> mLostBlocks = new ConcurrentHashSet<>(64, 0.90f, 64);
 
@@ -167,24 +168,24 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
   /**
    * Creates a new instance of {@link DefaultBlockMaster}.
    *
-   * @param journalFactory the factory for the journal to use for tracking master operations
+   * @param masterContext the context for Alluxio master
    */
-  DefaultBlockMaster(JournalFactory journalFactory) {
-    this(journalFactory, new SystemClock(), ExecutorServiceFactories
+  DefaultBlockMaster(MasterContext masterContext) {
+    this(masterContext, new SystemClock(), ExecutorServiceFactories
         .fixedThreadPoolExecutorServiceFactory(Constants.BLOCK_MASTER_NAME, 2));
   }
 
   /**
    * Creates a new instance of {@link DefaultBlockMaster}.
    *
-   * @param journalFactory the factory for the journal to use for tracking master operations
+   * @param masterContext the context for Alluxio master
    * @param clock the clock to use for determining the time
    * @param executorServiceFactory a factory for creating the executor service to use for running
    *        maintenance threads
    */
-  DefaultBlockMaster(JournalFactory journalFactory, Clock clock,
+  DefaultBlockMaster(MasterContext masterContext, Clock clock,
       ExecutorServiceFactory executorServiceFactory) {
-    super(journalFactory.create(Constants.BLOCK_MASTER_NAME), clock, executorServiceFactory);
+    super(masterContext, clock, executorServiceFactory);
     Metrics.registerGauges(this);
   }
 
@@ -205,10 +206,6 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
 
   @Override
   public void processJournalEntry(JournalEntry entry) throws IOException {
-    if (entry.getSequenceNumber() == 0) {
-      // This is the first journal entry, clear the master state.
-      mBlocks.clear();
-    }
     // TODO(gene): A better way to process entries besides a huge switch?
     if (entry.hasBlockContainerIdGenerator()) {
       mJournaledNextContainerId = (entry.getBlockContainerIdGenerator()).getNextContainerId();
@@ -228,6 +225,13 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
     } else {
       throw new IOException(ExceptionMessage.UNEXPECTED_JOURNAL_ENTRY.getMessage(entry));
     }
+  }
+
+  @Override
+  public void resetState() {
+    mBlocks.clear();
+    mJournaledNextContainerId = 0;
+    mBlockContainerIdGenerator.setNextContainerId(0);
   }
 
   @Override
@@ -278,7 +282,10 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
   }
 
   @Override
-  public List<WorkerInfo> getWorkerInfoList() {
+  public List<WorkerInfo> getWorkerInfoList() throws UnavailableException {
+    if (mSafeModeManager.isInSafeMode()) {
+      throw new UnavailableException(ExceptionMessage.MASTER_IN_SAFEMODE.getMessage());
+    }
     List<WorkerInfo> workerInfoList = new ArrayList<>(mWorkers.size());
     for (MasterWorkerInfo worker : mWorkers) {
       synchronized (worker) {
@@ -323,6 +330,7 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
         ret.add(worker.generateClientWorkerInfo());
       }
     }
+    Collections.sort(ret, new WorkerInfo.LastContactSecComparator());
     return ret;
   }
 
@@ -352,7 +360,7 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
             if (mBlocks.remove(blockId) != null) {
               JournalEntry entry = JournalEntry.newBuilder()
                   .setDeleteBlock(DeleteBlockEntry.newBuilder().setBlockId(blockId)).build();
-              appendJournalEntry(entry, journalContext);
+              journalContext.append(entry);
             }
           }
         }
@@ -397,7 +405,7 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
       try (JournalContext journalContext = createJournalContext()) {
         // This must be flushed while holding the lock on mBlockContainerIdGenerator, in order to
         // prevent subsequent calls to return ids that have not been journaled and flushed.
-        appendJournalEntry(getContainerIdJournalEntry(), journalContext);
+        journalContext.append(getContainerIdJournalEntry());
       }
       return containerId;
     }
@@ -460,8 +468,7 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
             if (writeJournal) {
               BlockInfoEntry blockInfo =
                   BlockInfoEntry.newBuilder().setBlockId(blockId).setLength(length).build();
-              appendJournalEntry(JournalEntry.newBuilder().setBlockInfo(blockInfo).build(),
-                  journalContext);
+              journalContext.append(JournalEntry.newBuilder().setBlockInfo(blockInfo).build());
             }
             // At this point, both the worker and the block metadata are locked.
 
@@ -499,15 +506,14 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
           // Successfully added the new block metadata. Append a journal entry for the new metadata.
           BlockInfoEntry blockInfo =
               BlockInfoEntry.newBuilder().setBlockId(blockId).setLength(length).build();
-          appendJournalEntry(JournalEntry.newBuilder().setBlockInfo(blockInfo).build(),
-              journalContext);
+          journalContext.append(JournalEntry.newBuilder().setBlockInfo(blockInfo).build());
         }
       }
     }
   }
 
   @Override
-  public BlockInfo getBlockInfo(long blockId) throws BlockInfoException {
+  public BlockInfo getBlockInfo(long blockId) throws BlockInfoException, UnavailableException {
     MasterBlockInfo block = mBlocks.get(blockId);
     if (block == null) {
       throw new BlockInfoException(ExceptionMessage.BLOCK_META_NOT_FOUND, blockId);
@@ -518,7 +524,7 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
   }
 
   @Override
-  public List<BlockInfo> getBlockInfoList(List<Long> blockIds) {
+  public List<BlockInfo> getBlockInfoList(List<Long> blockIds) throws UnavailableException {
     List<BlockInfo> ret = new ArrayList<>(blockIds.size());
     for (long blockId : blockIds) {
       MasterBlockInfo block = mBlocks.get(blockId);
@@ -721,7 +727,10 @@ public final class DefaultBlockMaster extends AbstractMaster implements BlockMas
    * @return a {@link BlockInfo} from a {@link MasterBlockInfo}. Populates worker locations
    */
   @GuardedBy("masterBlockInfo")
-  private BlockInfo generateBlockInfo(MasterBlockInfo masterBlockInfo) {
+  private BlockInfo generateBlockInfo(MasterBlockInfo masterBlockInfo) throws UnavailableException {
+    if (mSafeModeManager.isInSafeMode()) {
+      throw new UnavailableException(ExceptionMessage.MASTER_IN_SAFEMODE.getMessage());
+    }
     // "Join" to get all the addresses of the workers.
     List<BlockLocation> locations = new ArrayList<>();
     List<MasterBlockLocation> blockLocations = masterBlockInfo.getBlockLocations();

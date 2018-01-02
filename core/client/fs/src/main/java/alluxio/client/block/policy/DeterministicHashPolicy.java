@@ -13,13 +13,13 @@ package alluxio.client.block.policy;
 
 import alluxio.client.block.BlockWorkerInfo;
 import alluxio.client.block.policy.options.GetWorkerOptions;
-import alluxio.exception.ExceptionMessage;
-import alluxio.exception.status.UnavailableException;
 import alluxio.wire.WorkerNetAddress;
 
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import com.google.common.hash.HashFunction;
+import com.google.common.hash.Hashing;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -41,6 +41,7 @@ public final class DeterministicHashPolicy implements BlockLocationPolicy {
   private static final int DEFAULT_NUM_SHARDS = 1;
   private final int mShards;
   private final Random mRandom = new Random();
+  private final HashFunction mHashFunc = Hashing.md5();
 
   /**
    * Constructs a new {@link DeterministicHashPolicy}.
@@ -60,7 +61,7 @@ public final class DeterministicHashPolicy implements BlockLocationPolicy {
   }
 
   @Override
-  public WorkerNetAddress getWorker(GetWorkerOptions options) throws UnavailableException {
+  public WorkerNetAddress getWorker(GetWorkerOptions options) {
     List<BlockWorkerInfo> workerInfos = Lists.newArrayList(options.getBlockWorkerInfos());
     Collections.sort(workerInfos, new Comparator<BlockWorkerInfo>() {
       @Override
@@ -77,7 +78,8 @@ public final class DeterministicHashPolicy implements BlockLocationPolicy {
     List<WorkerNetAddress> workers = new ArrayList<>();
     // Try the next one if the worker mapped from the blockId doesn't work until all the workers
     // are examined.
-    int index = (int) (options.getBlockId() % (long) workerInfos.size());
+    int hv = Math.abs(mHashFunc.newHasher().putLong(options.getBlockId()).hash().asInt());
+    int index = hv % workerInfos.size();
     for (BlockWorkerInfo blockWorkerInfoUnused : workerInfos) {
       WorkerNetAddress candidate = workerInfos.get(index).getNetAddress();
       BlockWorkerInfo workerInfo = blockWorkerInfoMap.get(candidate);
@@ -89,11 +91,7 @@ public final class DeterministicHashPolicy implements BlockLocationPolicy {
       }
       index = (index + 1) % workerInfos.size();
     }
-    if (workers.isEmpty()) {
-      throw new UnavailableException(
-          ExceptionMessage.NO_SPACE_FOR_BLOCK_ON_WORKER.getMessage(options.getBlockSize()));
-    }
-    return workers.get(mRandom.nextInt(workers.size()));
+    return workers.isEmpty() ? null : workers.get(mRandom.nextInt(workers.size()));
   }
 
   @Override

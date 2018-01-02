@@ -13,7 +13,7 @@ package alluxio.wire;
 
 import alluxio.util.CommonUtils;
 
-import org.codehaus.jackson.map.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -37,6 +37,15 @@ public class WorkerInfoTest {
     checkEquality(workerInfo, other);
   }
 
+  @Test
+  public void lastContactSecComparator() {
+    Assert.assertTrue(compareLostWorkersWithTimes(0, 1) < 0);
+    Assert.assertTrue(compareLostWorkersWithTimes(1, 0) > 0);
+    Assert.assertTrue(compareLostWorkersWithTimes(1, 1) == 0);
+    Assert.assertTrue(compareLostWorkersWithTimes(-1, 1) < 0);
+    Assert.assertTrue(compareLostWorkersWithTimes(1, -1) > 0);
+  }
+
   public void checkEquality(WorkerInfo a, WorkerInfo b) {
     Assert.assertEquals(a.getId(), b.getId());
     Assert.assertEquals(a.getAddress(), b.getAddress());
@@ -46,6 +55,15 @@ public class WorkerInfoTest {
     Assert.assertEquals(a.getUsedBytes(), b.getUsedBytes());
     Assert.assertEquals(a.getStartTimeMs(), b.getStartTimeMs());
     Assert.assertEquals(a, b);
+  }
+
+  private static int compareLostWorkersWithTimes(int time1, int time2) {
+    WorkerInfo.LastContactSecComparator comparator = new WorkerInfo.LastContactSecComparator();
+    WorkerInfo worker1 = createRandom();
+    WorkerInfo worker2 = createRandom();
+    worker1.setLastContactSec(time1);
+    worker2.setLastContactSec(time2);
+    return comparator.compare(worker1, worker2);
   }
 
   public static WorkerInfo createRandom() {

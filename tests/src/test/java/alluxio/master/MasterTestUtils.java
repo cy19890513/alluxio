@@ -17,15 +17,14 @@ import alluxio.PropertyKey;
 import alluxio.master.block.BlockMasterFactory;
 import alluxio.master.file.FileSystemMaster;
 import alluxio.master.file.FileSystemMasterFactory;
-import alluxio.master.file.StartupConsistencyCheck;
-import alluxio.master.journal.Journal;
-import alluxio.master.journal.JournalFactory;
+import alluxio.master.file.StartupConsistencyCheck.Status;
+import alluxio.master.journal.JournalSystem;
+import alluxio.master.journal.JournalSystem.Mode;
+import alluxio.master.journal.JournalTestUtils;
 import alluxio.util.CommonUtils;
 import alluxio.util.WaitForOptions;
 
 import com.google.common.base.Function;
-
-import java.net.URI;
 
 public class MasterTestUtils {
 
@@ -60,9 +59,12 @@ public class MasterTestUtils {
       throws Exception {
     String masterJournal = Configuration.get(PropertyKey.MASTER_JOURNAL_FOLDER);
     MasterRegistry registry = new MasterRegistry();
-    JournalFactory factory = new Journal.Factory(new URI(masterJournal));
-    new BlockMasterFactory().create(registry, factory);
-    new FileSystemMasterFactory().create(registry, factory);
+    SafeModeManager safeModeManager = new DefaultSafeModeManager();
+    JournalSystem journalSystem = JournalTestUtils.createJournalSystem(masterJournal);
+    new BlockMasterFactory().create(registry, journalSystem, safeModeManager);
+    new FileSystemMasterFactory().create(registry, journalSystem, safeModeManager);
+    journalSystem.start();
+    journalSystem.setMode(isLeader ? Mode.PRIMARY : Mode.SECONDARY);
     registry.start(isLeader);
     return registry;
   }
@@ -76,8 +78,7 @@ public class MasterTestUtils {
     CommonUtils.waitFor("Startup consistency check completion", new Function<Void, Boolean>() {
       @Override
       public Boolean apply(Void aVoid) {
-        return master.getStartupConsistencyCheck().getStatus()
-            == StartupConsistencyCheck.Status.COMPLETE;
+        return master.getStartupConsistencyCheck().getStatus() != Status.RUNNING;
       }
     }, WaitForOptions.defaults().setTimeoutMs(Constants.MINUTE_MS));
   }

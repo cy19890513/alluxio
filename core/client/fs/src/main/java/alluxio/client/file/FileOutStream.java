@@ -23,6 +23,7 @@ import alluxio.client.file.options.CompleteFileOptions;
 import alluxio.client.file.options.OutStreamOptions;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.PreconditionMessage;
+import alluxio.exception.status.UnavailableException;
 import alluxio.metrics.MetricsSystem;
 import alluxio.resource.CloseableResource;
 import alluxio.util.CommonUtils;
@@ -35,7 +36,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.LinkedList;
+import java.util.ArrayList;
 import java.util.List;
 
 import javax.annotation.concurrent.NotThreadSafe;
@@ -68,7 +69,7 @@ public class FileOutStream extends AbstractOutStream {
   private boolean mClosed;
   private boolean mShouldCacheCurrentBlock;
   private BlockOutStream mCurrentBlockOutStream;
-  private List<BlockOutStream> mPreviousBlockOutStreams;
+  private final List<BlockOutStream> mPreviousBlockOutStreams;
 
   protected final AlluxioURI mUri;
 
@@ -89,7 +90,7 @@ public class FileOutStream extends AbstractOutStream {
     mOptions = options;
     mContext = context;
     mBlockStore = AlluxioBlockStore.create(mContext);
-    mPreviousBlockOutStreams = new LinkedList<>();
+    mPreviousBlockOutStreams = new ArrayList<>();
     mClosed = false;
     mCanceled = false;
     mShouldCacheCurrentBlock = mAlluxioStorageType.isStore();
@@ -97,9 +98,13 @@ public class FileOutStream extends AbstractOutStream {
     if (!mUnderStorageType.isSyncPersist()) {
       mUnderStorageOutputStream = null;
     } else { // Write is through to the under storage, create mUnderStorageOutputStream
+      WorkerNetAddress workerNetAddress = // not storing data to Alluxio, so block size is 0
+          options.getLocationPolicy().getWorkerForNextBlock(mBlockStore.getEligibleWorkers(), 0);
+      if (workerNetAddress == null) {
+        // Assume no worker is available because block size is 0
+        throw new UnavailableException(ExceptionMessage.NO_WORKER_AVAILABLE.getMessage());
+      }
       try {
-        WorkerNetAddress workerNetAddress = // not storing data to Alluxio, so block size is 0
-            options.getLocationPolicy().getWorkerForNextBlock(mBlockStore.getWorkerInfoList(), 0);
         mUnderStorageOutputStream = mCloser
             .register(UnderFileSystemFileOutStream.create(mContext, workerNetAddress, mOptions));
       } catch (Throwable t) {

@@ -54,7 +54,7 @@ public abstract class AbstractClient implements Client {
       Pattern.compile("Frame size \\((\\d+)\\) larger than max length");
 
   private static final int BASE_SLEEP_MS =
-      Configuration.getInt(PropertyKey.USER_RPC_RETRY_BASE_SLEEP_MS);
+      (int) Configuration.getMs(PropertyKey.USER_RPC_RETRY_BASE_SLEEP_MS);
   private static final int MAX_SLEEP_MS =
       (int) Configuration.getMs(PropertyKey.USER_RPC_RETRY_MAX_SLEEP_MS);
 
@@ -72,7 +72,7 @@ public abstract class AbstractClient implements Client {
    * Is true if this client was closed by the user. No further actions are possible after the client
    * is closed.
    */
-  protected boolean mClosed = false;
+  protected volatile boolean mClosed = false;
 
   /**
    * Stores the service version; used for detecting incompatible client-server pairs.
@@ -91,7 +91,7 @@ public abstract class AbstractClient implements Client {
    * @param address the address
    */
   public AbstractClient(Subject subject, InetSocketAddress address) {
-    mAddress = Preconditions.checkNotNull(address, "address");
+    mAddress = address;
     mServiceVersion = Constants.UNKNOWN_SERVICE_VERSION;
     mTransportProvider = TransportProvider.Factory.create();
     mParentSubject = subject;
@@ -159,7 +159,7 @@ public abstract class AbstractClient implements Client {
   /**
    * Connects with the remote.
    */
-  public synchronized void connect() throws IOException {
+  public synchronized void connect() throws AlluxioStatusException {
     if (mConnected) {
       return;
     }
@@ -168,7 +168,11 @@ public abstract class AbstractClient implements Client {
 
     RetryPolicy retryPolicy =
         new ExponentialBackoffRetry(BASE_SLEEP_MS, MAX_SLEEP_MS, RPC_MAX_NUM_RETRY);
-    while (!mClosed) {
+    while (true) {
+      if (mClosed) {
+        throw new FailedPreconditionException("Failed to connect: client has been closed");
+      }
+      // Re-query the address in each loop iteration in case it has changed (e.g. master failover).
       mAddress = getAddress();
       LOG.info("Alluxio client (version {}) is trying to connect with {} @ {}",
           RuntimeConstants.VERSION, getServiceName(), mAddress);
@@ -193,7 +197,6 @@ public abstract class AbstractClient implements Client {
               getServiceName(), mAddress, e.getMessage(), RuntimeConstants.ALLUXIO_DEBUG_DOCS_URL);
           throw new UnimplementedException(message, e);
         }
-        throw e;
       } catch (TTransportException e) {
         LOG.warn("Failed to connect ({}) with {} @ {}: {}", retryPolicy.getRetryCount(),
             getServiceName(), mAddress, e.getMessage());
@@ -204,10 +207,10 @@ public abstract class AbstractClient implements Client {
               + "is not able to connect to servers with SIMPLE security mode.";
           throw new UnavailableException(message, e);
         }
-        // TODO(peis): Consider closing the connection here as well.
-        if (!retryPolicy.attemptRetry()) {
-          break;
-        }
+      }
+      // TODO(peis): Consider closing the connection here as well.
+      if (!retryPolicy.attemptRetry()) {
+        break;
       }
     }
     // Reaching here indicates that we did not successfully connect.
@@ -247,18 +250,8 @@ public abstract class AbstractClient implements Client {
     mClosed = true;
   }
 
-  /**
-   * Closes the connection, then queries and sets current remote address.
-   */
-  public synchronized void resetConnection() {
-    disconnect();
-    mAddress = getAddress();
-  }
-
-  /**
-   * @return the {@link InetSocketAddress} of the remote
-   */
-  public synchronized InetSocketAddress getAddress() {
+  @Override
+  public synchronized InetSocketAddress getAddress() throws UnavailableException {
     return mAddress;
   }
 
@@ -287,7 +280,7 @@ public abstract class AbstractClient implements Client {
    * @param <V> type of return value of the RPC call
    * @return the return value of the RPC call
    */
-  protected synchronized <V> V retryRPC(RpcCallable<V> rpc) throws IOException {
+  protected synchronized <V> V retryRPC(RpcCallable<V> rpc) throws AlluxioStatusException {
     RetryPolicy retryPolicy =
         new ExponentialBackoffRetry(BASE_SLEEP_MS, MAX_SLEEP_MS, RPC_MAX_NUM_RETRY);
     while (!mClosed) {
@@ -305,9 +298,10 @@ public abstract class AbstractClient implements Client {
       } catch (TException e) {
         ex = e;
       }
-      LOG.warn(ex.toString());
       disconnect();
-      if (!retryPolicy.attemptRetry()) {
+      if (retryPolicy.attemptRetry()) {
+        LOG.warn("RPC failed with {}. Retrying.", ex.toString());
+      } else {
         throw new UnavailableException(
             "Failed after " + retryPolicy.getRetryCount() + " retries: " + ex.toString(), ex);
       }
